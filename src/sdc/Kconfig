@@ -190,6 +190,17 @@ config BT_CTLR_FAL_SIZE
 # Logging
 # ============================================================================
 
+config BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
+	bool "QoS connection event reports"
+	help
+	  Enable SoftDevice Controller QoS connection event reports.
+	  Provides per-connection-event CRC ok/error counts per channel,
+	  used by the BLE QoS channel map filter module.
+
+# ============================================================================
+# Logging
+# ============================================================================
+
 module = SDC
 module-str = SDC
 source "subsys/logging/Kconfig.template.log_config"

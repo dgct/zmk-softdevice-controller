@@ -2,6 +2,8 @@
 build/
 *.o
 *.a
+# Exception: precompiled chmap_filter library
+!src/util/chmap_filter/lib/**/*.a
 
 # IDE
 .vscode/

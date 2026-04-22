@@ -136,3 +136,45 @@ config ZMK_BLE_SUBRATE_PERIPHERAL_TIMEOUT
 	range 10 3200
 
 endif # BT_SUBRATING && ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
+
+# ============================================================================
+# BLE QoS Channel Map Filter
+# ============================================================================
+
+menuconfig ZMK_BLE_QOS
+	bool "BLE QoS channel map filter"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	depends on BT_CENTRAL
+	select BT_HCI_VS_EVT_USER
+	select BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
+	help
+	  Dynamically avoids congested BLE channels using per-connection CRC
+	  error statistics from the SoftDevice Controller. Uses Nordic's
+	  chmap_filter library to rate channels and update the channel map.
+
+	  Only effective on connections where the local device is the BLE
+	  central (i.e. the split keyboard link). The host link channel map
+	  is controlled by the host.
+
+if ZMK_BLE_QOS
+
+config ZMK_BLE_QOS_INTERVAL
+	int "QoS processing interval (ms)"
+	default 1000
+	range 1000 10000
+	help
+	  How often the QoS thread wakes to process CRC statistics and
+	  potentially update the channel map. BLE spec requires at least
+	  1 second between channel map updates.
+
+config ZMK_BLE_QOS_STACK_SIZE
+	int "QoS thread stack size"
+	default 512
+	help
+	  Stack size for the QoS processing thread.
+
+module = ZMK_BLE_QOS
+module-str = zmk_ble_qos
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # ZMK_BLE_QOS

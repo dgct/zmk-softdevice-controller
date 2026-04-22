@@ -158,6 +158,15 @@ config BT_CTLR_SDC_MAX_CONN_EVENT_LEN_DEFAULT
 	help
 	  Maximum time in microseconds for a connection event.
 
+config BT_CTLR_SDC_CONN_EVENT_EXTEND_DEFAULT
+	bool "Enable connection event extension by default"
+	default y
+	help
+	  Allow connection events to extend beyond the nominal length
+	  when there are queued packets. Lets multiple HID reports go
+	  out in a single connection event instead of waiting for the
+	  next interval.
+
 config BT_CTLR_SDC_CENTRAL_ACL_EVENT_SPACING_DEFAULT
 	int "Default central ACL event spacing (us)"
 	depends on BT_CENTRAL

@@ -169,7 +169,7 @@ config ZMK_BLE_QOS_INTERVAL
 
 config ZMK_BLE_QOS_STACK_SIZE
 	int "QoS thread stack size"
-	default 512
+	default 768
 	help
 	  Stack size for the QoS processing thread.
 

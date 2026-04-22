@@ -136,7 +136,9 @@ static void apply_conn_param_to_host(struct bt_conn *conn, void *data) {
     const struct bt_le_conn_param *params = data;
     struct bt_conn_info info;
 
-    bt_conn_get_info(conn, &info);
+    if (bt_conn_get_info(conn, &info)) {
+        return;
+    }
 
     /* Host connections are where we act as peripheral */
     if (info.role == BT_CONN_ROLE_PERIPHERAL && info.state == BT_CONN_STATE_CONNECTED) {
@@ -159,7 +161,9 @@ static void apply_subrate_to_conn(struct bt_conn *conn, void *data) {
     const struct bt_conn_le_subrate_param *params = data;
     struct bt_conn_info info;
 
-    bt_conn_get_info(conn, &info);
+    if (bt_conn_get_info(conn, &info)) {
+        return;
+    }
 
     if (info.role == BT_CONN_ROLE_CENTRAL && info.state == BT_CONN_STATE_CONNECTED) {
         int err = bt_conn_le_subrate_request(conn, params);
@@ -252,7 +256,7 @@ static int subrating_activity_listener(const zmk_event_t *eh) {
         break;
     default:
         LOG_WRN("Unhandled activity state: %d", ev->state);
-        return -EINVAL;
+        break;
     }
     return 0;
 }
@@ -293,7 +297,7 @@ static const struct bt_conn_le_subrate_param peripheral_active_params = {
     .subrate_max = 2,
     .max_latency = 0,
     .continuation_number = 1,
-    .supervision_timeout = 400, /* 4 seconds */
+    .supervision_timeout = CONFIG_ZMK_BLE_SUBRATE_PERIPHERAL_TIMEOUT,
 };
 
 static bool peripheral_is_active = false;
@@ -302,7 +306,9 @@ static void apply_subrate_to_peripheral_conn(struct bt_conn *conn, void *data) {
     const struct bt_conn_le_subrate_param *params = data;
     struct bt_conn_info info;
 
-    bt_conn_get_info(conn, &info);
+    if (bt_conn_get_info(conn, &info)) {
+        return;
+    }
 
     if (info.role == BT_CONN_ROLE_PERIPHERAL && info.state == BT_CONN_STATE_CONNECTED) {
         int err = bt_conn_le_subrate_request(conn, params);
@@ -335,6 +341,22 @@ static int peripheral_subrating_activity_listener(const zmk_event_t *eh) {
 ZMK_LISTENER(sdc_subrating_peripheral, peripheral_subrating_activity_listener);
 ZMK_SUBSCRIPTION(sdc_subrating_peripheral, zmk_activity_state_changed);
 
+static void peripheral_disconnected_cb(struct bt_conn *conn, uint8_t reason)
+{
+    struct bt_conn_info info;
+
+    if (bt_conn_get_info(conn, &info)) {
+        return;
+    }
+    if (info.role == BT_CONN_ROLE_PERIPHERAL) {
+        peripheral_is_active = false;
+    }
+}
+
+BT_CONN_CB_DEFINE(sdc_peripheral_conn_cb) = {
+    .disconnected = peripheral_disconnected_cb,
+};
+
 #endif /* CONFIG_ZMK_SPLIT && !CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 /* Callbacks for logging (all builds) */
@@ -345,7 +367,9 @@ static void subrate_changed_cb(struct bt_conn *conn,
     struct bt_conn_info info;
     char addr_str[BT_ADDR_LE_STR_LEN];
 
-    bt_conn_get_info(conn, &info);
+    if (bt_conn_get_info(conn, &info)) {
+        return;
+    }
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr_str, sizeof(addr_str));
 
     const char *role = info.role == BT_CONN_ROLE_CENTRAL ? "central" : "peripheral";
@@ -389,9 +413,9 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval,
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr_str, sizeof(addr_str));
 
     /* interval is in 1.25ms units, timeout is in 10ms units */
-    uint32_t interval_us = interval * 1250;  /* Convert to microseconds */
-    LOG_INF("Conn params [%s]: interval=%d.%02dms, latency=%d, timeout=%dms",
-            addr_str, interval_us / 1000, (interval_us % 1000) / 10,
+    uint32_t interval_us = interval * 1250;
+    LOG_INF("Conn params [%s]: interval=%u.%03ums, latency=%u, timeout=%ums",
+            addr_str, interval_us / 1000, interval_us % 1000,
             latency, timeout * 10);
 }
 

@@ -414,38 +414,26 @@ static int hci_driver_send(const struct device *dev, struct net_buf *buf)
 	}
 
 	/* Vanilla Zephyr stores buffer type in user_data, not as H4 prefix byte.
-	 * NCS code expects to pull an H4 type byte, but there isn't one.
-	 * We still call net_buf_pull_u8/push_u8 to maintain the same code flow,
-	 * then get the real type from user_data.
+	 * Get the type directly from user_data.
 	 */
-	uint8_t first_byte = net_buf_pull_u8(buf);
-	net_buf_push_u8(buf, first_byte);
-
 	type = bt_buf_get_type(buf);
-	if (type == BT_BUF_CMD) {
-		type = BT_HCI_H4_CMD;
-	} else if (type == BT_BUF_ACL_OUT) {
-		type = BT_HCI_H4_ACL;
-	} else if (type == BT_BUF_ISO_OUT) {
-		type = BT_HCI_H4_ISO;
-	}
 
 	switch (type) {
 #if defined(CONFIG_BT_CONN)
-	case BT_HCI_H4_ACL:
+	case BT_BUF_ACL_OUT:
 		err = acl_handle(buf);
 		break;
 #endif
-	case BT_HCI_H4_CMD:
+	case BT_BUF_CMD:
 		err = cmd_handle(buf);
 		break;
 #if defined(CONFIG_BT_CTLR_ISO_TX_BUFFERS)
-	case BT_HCI_H4_ISO:
+	case BT_BUF_ISO_OUT:
 		err = iso_handle(buf);
 		break;
 #endif
 	default:
-		LOG_ERR("Unknown H4 type 0x%02x", type);
+		LOG_ERR("Unknown buf type %u", type);
 		return -EINVAL;
 	}
 

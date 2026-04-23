@@ -1633,16 +1633,14 @@ static uint8_t vs_cmd_put(uint8_t const *const cmd, uint8_t *const raw_event_out
 		return sdc_hci_cmd_vs_zephyr_read_tx_power((void *)cmd_params,
 							   (void *)event_out_params);
 #endif /* CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL */
-#if CONFIG_BT_CTLR_SDC_LLPM
-	case SDC_HCI_OPCODE_CMD_VS_LLPM_MODE_SET:
-		return sdc_hci_cmd_vs_llpm_mode_set((void *)cmd_params);
-#endif /* CONFIG_BT_CTLR_SDC_LLPM */
 	case SDC_HCI_OPCODE_CMD_VS_CONN_UPDATE:
 		return sdc_hci_cmd_vs_conn_update((void *)cmd_params);
 	case SDC_HCI_OPCODE_CMD_VS_CONN_EVENT_EXTEND:
 		return sdc_hci_cmd_vs_conn_event_extend((void *)cmd_params);
+#ifdef CONFIG_BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 	case SDC_HCI_OPCODE_CMD_VS_QOS_CONN_EVENT_REPORT_ENABLE:
 		return sdc_hci_cmd_vs_qos_conn_event_report_enable((void *)cmd_params);
+#endif
 #ifdef CONFIG_BT_CTLR_SDC_QOS_CHANNEL_SURVEY
 	case SDC_HCI_OPCODE_CMD_VS_QOS_CHANNEL_SURVEY_ENABLE:
 		return sdc_hci_cmd_vs_qos_channel_survey_enable((void *)cmd_params);

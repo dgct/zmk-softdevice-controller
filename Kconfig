@@ -28,7 +28,7 @@ config ZMK_BLE_SUBRATE_ACTIVE_CN
 
 config ZMK_BLE_SUBRATE_ACTIVE_MAX_LATENCY
 	int "Active maximum peripheral latency"
-	default 15
+	default 4
 	range 0 499
 
 # IDLE tier

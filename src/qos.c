@@ -37,7 +37,6 @@ static uint8_t chmap_inst_buf[CHMAP_FILTER_INST_SIZE]
 static struct chmap_instance *chmap_inst;
 
 static atomic_t processing;
-static bool qos_initialized;
 static bool reporting_enabled;
 
 /*
@@ -205,7 +204,6 @@ static int qos_init(void)
 	k_thread_name_set(&qos_thread, "ble_qos");
 
 	LOG_INF("BLE QoS channel map filter initialized");
-	qos_initialized = true;
 
 	return 0;
 }

@@ -57,15 +57,6 @@ config ZMK_SDC_CENTRAL
 endchoice
 
 # ============================================================================
-# SDC Features
-# ============================================================================
-
-config ZMK_SDC_LLPM
-	bool "Low Latency Packet Mode (LLPM)"
-	help
-	  Nordic proprietary feature allowing connection intervals down to 1ms.
-
-# ============================================================================
 # MPSL Configuration
 # ============================================================================
 
@@ -195,10 +186,6 @@ config BT_CTLR_FAL_SIZE
 	range 0 255
 	help
 	  Maximum addresses in the Filter Accept List.
-
-# ============================================================================
-# Logging
-# ============================================================================
 
 config BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 	bool "QoS connection event reports"

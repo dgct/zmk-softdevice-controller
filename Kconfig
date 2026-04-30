@@ -138,6 +138,21 @@ config ZMK_BLE_SUBRATE_PERIPHERAL_TIMEOUT
 endif # BT_SUBRATING && ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
 
 # ============================================================================
+# Connection Event Flush
+# ============================================================================
+
+config ZMK_SDC_CONN_EVENT_FLUSH
+	bool "Connection event flush callback"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	select BT_HCI_VS_EVT_USER
+	select BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
+	help
+	  Expose a callback triggered on each BLE connection event using SDC
+	  anchor point update reports. Used by the input split accumulator to
+	  flush motion data in sync with the radio schedule, eliminating the
+	  beat-pattern jitter between input sample rate and connection interval.
+
+# ============================================================================
 # BLE QoS Channel Map Filter
 # ============================================================================
 

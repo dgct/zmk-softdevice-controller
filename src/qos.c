@@ -30,6 +30,9 @@
 
 #include "chmap_filter.h"
 
+#include <zmk/event_manager.h>
+#include <zmk/events/activity_state_changed.h>
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 
@@ -46,8 +49,10 @@ static struct chmap_instance *chmap_inst;
 
 static atomic_t processing;
 static atomic_t crc_errors_seen;
+static atomic_t burst_requested;
 static bool reporting_enabled;
-static uint32_t current_interval_ms = QOS_INTERVAL_BASE;
+static uint32_t current_interval_ms = QOS_INTERVAL_FAST;
+static enum zmk_activity_state last_activity_state = ZMK_ACTIVITY_SLEEP;
 
 /*
  * VS HCI event callback — called from the BT RX thread whenever the
@@ -152,10 +157,13 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Adapt interval based on whether errors were seen. */
-		if (atomic_cas(&crc_errors_seen, true, false)) {
+		/* Adapt interval: burst on CRC errors or wake-from-sleep. */
+		bool burst = atomic_cas(&burst_requested, true, false);
+		bool errors = atomic_cas(&crc_errors_seen, true, false);
+		if (burst || errors) {
 			if (current_interval_ms > QOS_INTERVAL_FAST) {
-				LOG_INF("QoS: CRC errors, interval %u -> %u ms",
+				LOG_INF("QoS: %s, interval %u -> %u ms",
+					errors ? "CRC errors" : "wake burst",
 					current_interval_ms, QOS_INTERVAL_FAST);
 			}
 			current_interval_ms = QOS_INTERVAL_FAST;
@@ -240,9 +248,35 @@ static int qos_init(void)
 			QOS_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&qos_thread, "ble_qos");
 
-	LOG_INF("BLE QoS channel map filter initialized");
+	LOG_INF("BLE QoS channel map filter initialized (fast burst on boot)");
 
 	return 0;
 }
 
 SYS_INIT(qos_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+/*
+ * Activity state listener — triggers a QoS burst on wake from sleep.
+ * Idle→active transitions (frequent with 1s idle timeout) are ignored.
+ * Sleep→active means the RF environment may have changed significantly.
+ */
+static int qos_activity_listener(const zmk_event_t *eh)
+{
+	struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+	if (ev == NULL) {
+		return -ENOTSUP;
+	}
+
+	enum zmk_activity_state prev = last_activity_state;
+	last_activity_state = ev->state;
+
+	if (ev->state == ZMK_ACTIVITY_ACTIVE && prev == ZMK_ACTIVITY_SLEEP) {
+		LOG_INF("QoS: wake from sleep, requesting burst");
+		atomic_set(&burst_requested, true);
+	}
+
+	return 0;
+}
+
+ZMK_LISTENER(ble_qos_activity, qos_activity_listener);
+ZMK_SUBSCRIPTION(ble_qos_activity, zmk_activity_state_changed);

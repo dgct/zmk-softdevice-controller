@@ -10,6 +10,12 @@
  * Uses SDC's per-connection-event CRC statistics and Nordic's chmap_filter
  * library to dynamically blacklist interference-heavy BLE channels.
  * Only runs on the central (the side that can call bt_le_set_chan_map).
+ *
+ * Adaptive interval: when CRC errors are detected the processing interval
+ * drops to QOS_INTERVAL_FAST_MS and then doubles each cycle (exponential
+ * back-off) until it returns to QOS_INTERVAL (the baseline).  This lets
+ * the filter react quickly to interference bursts while staying cheap
+ * during quiet periods.
  */
 
 #include <zephyr/kernel.h>
@@ -28,6 +34,8 @@
 LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 
 #define QOS_THREAD_PRIORITY K_PRIO_PREEMPT(K_LOWEST_APPLICATION_THREAD_PRIO)
+#define QOS_INTERVAL_BASE   CONFIG_ZMK_BLE_QOS_INTERVAL
+#define QOS_INTERVAL_FAST   CONFIG_ZMK_BLE_QOS_INTERVAL_FAST
 
 static K_THREAD_STACK_DEFINE(qos_stack, CONFIG_ZMK_BLE_QOS_STACK_SIZE);
 static struct k_thread qos_thread;
@@ -37,7 +45,9 @@ static uint8_t chmap_inst_buf[CHMAP_FILTER_INST_SIZE]
 static struct chmap_instance *chmap_inst;
 
 static atomic_t processing;
+static atomic_t crc_errors_seen;
 static bool reporting_enabled;
+static uint32_t current_interval_ms = QOS_INTERVAL_BASE;
 
 /*
  * VS HCI event callback — called from the BT RX thread whenever the
@@ -49,6 +59,9 @@ static bool reporting_enabled;
  * Uses an atomic flag to cheaply skip updates while the QoS thread
  * is running chmap_filter_process() — avoids any lock contention
  * on the hot path. Dropping occasional CRC samples is harmless.
+ *
+ * When CRC errors are observed the crc_errors_seen flag is set so the
+ * QoS thread can tighten its processing interval on the next wake.
  */
 static bool on_vs_evt(struct net_buf_simple *buf)
 {
@@ -67,6 +80,9 @@ static bool on_vs_evt(struct net_buf_simple *buf)
 			evt->channel_index,
 			evt->crc_ok_count,
 			evt->crc_error_count);
+		if (evt->crc_error_count > 0) {
+			atomic_set(&crc_errors_seen, true);
+		}
 		return true;
 	default:
 		return false;
@@ -108,12 +124,17 @@ static int enable_conn_event_reporting(void)
 /*
  * QoS thread — runs at the lowest application priority.
  *
- * Periodically:
- * 1. Sets the "processing" atomic to prevent CRC updates during processing
- * 2. Calls chmap_filter_process() to evaluate channel quality
- * 3. If the filter recommends a channel map change, applies it via
- *    bt_le_set_chan_map() (only effective for connections where we are central)
- * 4. Confirms the map so the library's internal state stays consistent
+ * Adaptive interval logic:
+ * - Baseline: sleeps for QOS_INTERVAL_BASE (default 1000ms)
+ * - On CRC errors: drops to QOS_INTERVAL_FAST (default 100ms)
+ * - Each clean cycle (no new errors): interval doubles
+ * - Capped at QOS_INTERVAL_BASE
+ *
+ * Steps each wake:
+ * 1. Check if CRC errors were seen since last wake
+ * 2. If yes, reset interval to FAST; if no, double toward BASE
+ * 3. Run chmap_filter_process() to evaluate channel quality
+ * 4. If the filter recommends a channel map change, apply it
  */
 static void qos_thread_fn(void *p1, void *p2, void *p3)
 {
@@ -125,10 +146,25 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 		bool update_channel_map;
 		int err;
 
-		k_sleep(K_MSEC(CONFIG_ZMK_BLE_QOS_INTERVAL));
+		k_sleep(K_MSEC(current_interval_ms));
 
 		if (!reporting_enabled) {
 			continue;
+		}
+
+		/* Adapt interval based on whether errors were seen. */
+		if (atomic_cas(&crc_errors_seen, true, false)) {
+			if (current_interval_ms > QOS_INTERVAL_FAST) {
+				LOG_INF("QoS: CRC errors, interval %u -> %u ms",
+					current_interval_ms, QOS_INTERVAL_FAST);
+			}
+			current_interval_ms = QOS_INTERVAL_FAST;
+		} else if (current_interval_ms < QOS_INTERVAL_BASE) {
+			uint32_t next = current_interval_ms * 2;
+			if (next > QOS_INTERVAL_BASE) {
+				next = QOS_INTERVAL_BASE;
+			}
+			current_interval_ms = next;
 		}
 
 		atomic_set(&processing, true);
@@ -145,7 +181,8 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 		if (err) {
 			LOG_WRN("bt_le_set_chan_map failed: %d", err);
 		} else {
-			LOG_INF("BLE channel map updated");
+			LOG_INF("BLE channel map updated (interval=%u ms)",
+				current_interval_ms);
 		}
 
 		chmap_filter_suggested_map_confirm(chmap_inst);

@@ -221,13 +221,23 @@ menuconfig ZMK_BLE_QOS
 if ZMK_BLE_QOS
 
 config ZMK_BLE_QOS_INTERVAL
-	int "QoS processing interval (ms)"
+	int "QoS baseline processing interval (ms)"
 	default 1000
-	range 1000 10000
+	range 100 10000
 	help
-	  How often the QoS thread wakes to process CRC statistics and
-	  potentially update the channel map. BLE spec requires at least
-	  1 second between channel map updates.
+	  Baseline interval for the QoS thread. The thread decays back to
+	  this interval when no CRC errors are detected. During interference
+	  the interval drops to ZMK_BLE_QOS_INTERVAL_FAST and doubles each
+	  clean cycle until reaching this value.
+
+config ZMK_BLE_QOS_INTERVAL_FAST
+	int "QoS fast processing interval on CRC errors (ms)"
+	default 100
+	range 50 1000
+	help
+	  When CRC errors are detected, the QoS processing interval drops
+	  to this value for rapid channel map adaptation. The interval then
+	  doubles each error-free cycle back toward QOS_INTERVAL.
 
 config ZMK_BLE_QOS_STACK_SIZE
 	int "QoS thread stack size"

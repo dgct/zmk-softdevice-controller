@@ -7,6 +7,10 @@ if(CONFIG_ZMK_BT_LL_SOFTDEVICE AND CONFIG_BT_SUBRATING)
   zephyr_include_directories(${APPLICATION_SOURCE_DIR}/include)
 endif()
 
+if(CONFIG_ZMK_BLE_LLPM)
+  zephyr_library_sources(src/llpm.c)
+endif()
+
 if(CONFIG_ZMK_BLE_QOS)
   zephyr_library_sources(src/qos.c)
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/src/util/chmap_filter/include)

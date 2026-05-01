@@ -1445,6 +1445,15 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 		MULTITHREADING_LOCK_RELEASE();
 		return -ENOTSUP;
 	}
+
+#if defined(CONFIG_BT_CTLR_SDC_LLPM)
+	sdc_hci_cmd_vs_llpm_mode_set_t llpm_params = { .enable = 1 };
+	err = sdc_hci_cmd_vs_llpm_mode_set(&llpm_params);
+	if (err) {
+		MULTITHREADING_LOCK_RELEASE();
+		return -ENOTSUP;
+	}
+#endif
 #endif /* CONFIG_BT_CONN */
 
 #if defined(CONFIG_BT_CENTRAL)

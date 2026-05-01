@@ -143,6 +143,63 @@ endif # BT_SUBRATING && ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
 
 # ============================================================================
 # ============================================================================
+# BLE LLPM (Low Latency Packet Mode) for split link
+# ============================================================================
+
+menuconfig ZMK_BLE_LLPM
+	bool "BLE LLPM for split link"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	depends on BT_CENTRAL
+	select BT_CTLR_SDC_LLPM
+	help
+	  Use Nordic's Low Latency Packet Mode to run the split
+	  central-peripheral BLE link at 1-7ms connection intervals
+	  (in 1ms steps) instead of the BLE-standard 7.5ms minimum.
+
+	  Both halves must run the SoftDevice Controller. The host link
+	  (to macOS/Windows/Linux) is unaffected — LLPM only applies to
+	  connections where the local device is the BLE central.
+
+	  Trade-off: lower latency and less trailing float, but more
+	  radio wakeups (higher power during active use).
+
+if ZMK_BLE_LLPM
+
+config ZMK_BLE_LLPM_INTERVAL_US
+	int "LLPM connection interval (microseconds)"
+	default 2000
+	range 1000 7000
+	help
+	  Target connection interval for the split link in microseconds.
+	  Valid range: 1000-7000 in 1000 us steps.
+	  1000 = 1ms (lowest latency, highest power)
+	  2000 = 2ms (good balance for trackpoint/mouse)
+	  7000 = 7ms (close to standard BLE minimum)
+
+config ZMK_BLE_LLPM_SWITCH_DELAY_MS
+	int "Delay before switching to LLPM (ms)"
+	default 500
+	range 100 5000
+	help
+	  Milliseconds to wait after connection before issuing the
+	  vendor-specific connection update to switch to LLPM interval.
+	  Allows pairing/encryption to complete first.
+
+config ZMK_BLE_LLPM_SUPERVISION_TIMEOUT
+	int "LLPM supervision timeout (×10ms)"
+	default 400
+	range 100 3200
+	help
+	  Supervision timeout for the LLPM connection in 10ms units.
+	  400 = 4 seconds. Range: 1-32 seconds.
+
+module = ZMK_BLE_LLPM
+module-str = zmk_ble_llpm
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # ZMK_BLE_LLPM
+
+# ============================================================================
 # BLE QoS Channel Map Filter
 # ============================================================================
 

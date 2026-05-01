@@ -159,6 +159,16 @@ config BT_CTLR_SDC_CONN_EVENT_EXTEND_DEFAULT
 	  out in a single connection event instead of waiting for the
 	  next interval.
 
+config BT_CTLR_SDC_LLPM
+	bool "Enable Low Latency Packet Mode (LLPM)"
+	depends on BT_CONN
+	help
+	  Enable Nordic's LLPM, which allows connection intervals
+	  of 1-7ms (in 1ms steps) via vendor-specific HCI commands.
+	  Standard BLE minimum is 7.5ms.
+	  LLPM mode is enabled during SDC init; per-connection interval
+	  changes are made via the ZMK_BLE_LLPM module.
+
 config BT_CTLR_SDC_CENTRAL_ACL_EVENT_SPACING_DEFAULT
 	int "Default central ACL event spacing (us)"
 	depends on BT_CENTRAL

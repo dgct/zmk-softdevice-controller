@@ -1635,6 +1635,10 @@ static uint8_t vs_cmd_put(uint8_t const *const cmd, uint8_t *const raw_event_out
 #endif /* CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL */
 	case SDC_HCI_OPCODE_CMD_VS_CONN_UPDATE:
 		return sdc_hci_cmd_vs_conn_update((void *)cmd_params);
+#ifdef CONFIG_BT_CTLR_SDC_LLPM
+	case SDC_HCI_OPCODE_CMD_VS_LLPM_MODE_SET:
+		return sdc_hci_cmd_vs_llpm_mode_set((void *)cmd_params);
+#endif
 	case SDC_HCI_OPCODE_CMD_VS_CONN_EVENT_EXTEND:
 		return sdc_hci_cmd_vs_conn_event_extend((void *)cmd_params);
 #ifdef CONFIG_BT_CTLR_SDC_QOS_CONN_EVENT_REPORT

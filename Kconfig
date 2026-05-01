@@ -152,6 +152,14 @@ config ZMK_SDC_CONN_EVENT_FLUSH
 	  flush motion data in sync with the radio schedule, eliminating the
 	  beat-pattern jitter between input sample rate and connection interval.
 
+if ZMK_SDC_CONN_EVENT_FLUSH
+
+module = ZMK_CE_FLUSH
+module-str = zmk_ce_flush
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # ZMK_SDC_CONN_EVENT_FLUSH
+
 # ============================================================================
 # BLE QoS Channel Map Filter
 # ============================================================================

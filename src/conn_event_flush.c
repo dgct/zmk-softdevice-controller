@@ -28,7 +28,7 @@
 #include <zmk/sdc/conn_event_flush.h>
 
 #include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(zmk_ce_flush, CONFIG_LOG_DEFAULT_LEVEL);
+LOG_MODULE_REGISTER(zmk_ce_flush, CONFIG_ZMK_CE_FLUSH_LOG_LEVEL);
 
 static void (*flush_cb)(void);
 static bool anchor_reports_enabled;

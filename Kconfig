@@ -3,14 +3,9 @@ rsource "src/sdc/Kconfig"
 # Three-tier subrating: ACTIVE (typing) -> IDLE (~30s) -> DORMANT (+5min)
 # Central controls tier transitions; peripheral requests ACTIVE on local activity
 
-if BT_SUBRATING && ZMK_SPLIT_ROLE_CENTRAL
+# ACTIVE tier params shared by both central and peripheral
+if BT_SUBRATING && ZMK_SPLIT
 
-config ZMK_BLE_SUBRATE_TIMEOUT
-	int "Supervision timeout (10ms units)"
-	default 800
-	range 10 3200
-
-# ACTIVE tier
 config ZMK_BLE_SUBRATE_ACTIVE_MIN
 	int "Active subrate factor minimum"
 	default 1
@@ -25,6 +20,15 @@ config ZMK_BLE_SUBRATE_ACTIVE_CN
 	int "Active continuation number"
 	default 1
 	range 0 499
+
+endif # BT_SUBRATING && ZMK_SPLIT
+
+if BT_SUBRATING && ZMK_SPLIT_ROLE_CENTRAL
+
+config ZMK_BLE_SUBRATE_TIMEOUT
+	int "Supervision timeout (10ms units)"
+	default 800
+	range 10 3200
 
 config ZMK_BLE_SUBRATE_ACTIVE_MAX_LATENCY
 	int "Active maximum peripheral latency"

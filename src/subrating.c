@@ -293,10 +293,10 @@ SYS_INIT(zmk_sdc_subrating_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
  */
 
 static const struct bt_conn_le_subrate_param peripheral_active_params = {
-    .subrate_min = 1,
-    .subrate_max = 2,
+    .subrate_min = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MIN,
+    .subrate_max = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MAX,
     .max_latency = 0,
-    .continuation_number = 1,
+    .continuation_number = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_CN,
     .supervision_timeout = CONFIG_ZMK_BLE_SUBRATE_PERIPHERAL_TIMEOUT,
 };
 

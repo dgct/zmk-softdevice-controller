@@ -212,6 +212,14 @@ config BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 	  interval. On a peripheral, it fires for connection events in which a
 	  packet from the central is received.
 
+config BT_CTLR_SDC_ALLOW_PARALLEL_SCANNING_AND_INITIATING
+	bool "Allow parallel scanning and initiating"
+	depends on BT_CENTRAL
+	help
+	  Allow scanning and initiating at the same time. This enables
+	  the central to reconnect to a peripheral faster after wake or
+	  reset by not having to stop scanning first.
+
 # ============================================================================
 # BLE 6.0/6.2 Features (nrfxlib >= v3.2.0)
 # ============================================================================

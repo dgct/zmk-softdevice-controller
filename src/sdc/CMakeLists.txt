@@ -36,6 +36,7 @@ zephyr_include_directories(
   ${NRFXLIB_DIR}/mpsl/include
   ${NRFXLIB_DIR}/mpsl/include/protocol
   ${NRFXLIB_DIR}/mpsl/fem/include
+  ${ZEPHYR_BASE}/drivers/flash
   include
   controller
   mpsl
@@ -57,6 +58,11 @@ zephyr_library_sources(
 )
 
 zephyr_library_sources_ifdef(CONFIG_BT_CTLR_CRYPTO controller/crypto.c)
+
+# MPSL flash radio synchronization backend
+zephyr_library_sources_ifdef(CONFIG_SOC_FLASH_NRF_RADIO_SYNC_MPSL
+  mpsl/flash_sync_mpsl.c
+)
 
 # Binary libraries
 set(SDC_LIB_DIR ${NRFXLIB_DIR}/softdevice_controller/lib/${SDC_SOC_FAMILY}/${SDC_FLOAT_ABI})

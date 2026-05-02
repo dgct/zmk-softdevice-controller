@@ -216,6 +216,50 @@ config BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 # Logging
 # ============================================================================
 
+# ============================================================================
+# Flash Radio Synchronization (MPSL timeslots)
+# ============================================================================
+
+# Reopen the flash driver's radio sync choice to inject the MPSL backend.
+# The choice is originally defined in zephyr/drivers/flash/Kconfig.nrf with
+# TICKER (for BT_LL_SW_SPLIT) and NONE.  We add a third option that uses
+# MPSL timeslots — identical to what NCS does in sdk-nrf.
+
+if SOC_FLASH_NRF
+
+choice SOC_FLASH_NRF_RADIO_SYNC_CHOICE
+	default SOC_FLASH_NRF_RADIO_SYNC_MPSL
+
+config SOC_FLASH_NRF_RADIO_SYNC_MPSL
+	bool "Nordic nRFx flash driver synchronized using MPSL"
+	help
+	  Enable synchronization between the flash memory driver and radio
+	  using MPSL timeslots.  Flash operations are scheduled into idle
+	  radio time, preventing any radio stalls during NVS writes/erases.
+
+endchoice
+
+config SOC_FLASH_NRF_RADIO_SYNC_MPSL_NORMAL_PRIORITY_TIMEOUT_US
+	int "Timeout before escalating timeslot priority [us]"
+	depends on SOC_FLASH_NRF_RADIO_SYNC_MPSL
+	default 10000
+	help
+	  Initially flash timeslots are requested at normal priority.
+	  After this timeout (in microseconds) without obtaining a slot,
+	  the request is re-issued at high priority to ensure forward
+	  progress even under heavy radio traffic.
+
+config SOC_FLASH_NRF_RADIO_SYNC_MPSL_TIMESLOT_SESSION_COUNT
+	int
+	default 1 if SOC_FLASH_NRF_RADIO_SYNC_MPSL
+	default 0
+
+endif # SOC_FLASH_NRF
+
+# ============================================================================
+# Logging
+# ============================================================================
+
 module = SDC
 module-str = SDC
 source "subsys/logging/Kconfig.template.log_config"

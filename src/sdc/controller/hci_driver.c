@@ -278,6 +278,13 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_FRAME_SPACE_UPDATE_MEM_SIZE 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS)
+#define SDC_SHORTER_CONN_INTERVALS_MEM_SIZE \
+	SDC_MEM_SHORTER_CONNECTION_INTERVALS(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_SHORTER_CONN_INTERVALS_MEM_SIZE 0
+#endif
+
 #define MEMPOOL_SIZE ((PERIPHERAL_COUNT * PERIPHERAL_MEM_SIZE) + \
 		      (SDC_CENTRAL_COUNT * CENTRAL_MEM_SIZE) + \
 		      (SDC_ADV_SET_MEM_SIZE) + \
@@ -300,7 +307,8 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 		      (SDC_MEM_ISO_TX_POOL) + \
 		      (SDC_MEM_CS_POOL) + \
 		      (SDC_EXTENDED_FEAT_SET_MEM_SIZE) + \
-		      (SDC_FRAME_SPACE_UPDATE_MEM_SIZE))
+		      (SDC_FRAME_SPACE_UPDATE_MEM_SIZE) + \
+		      (SDC_SHORTER_CONN_INTERVALS_MEM_SIZE))
 
 #if defined(CONFIG_BT_SDC_ADDITIONAL_MEMORY)
 __aligned(8) uint8_t sdc_mempool[MEMPOOL_SIZE + CONFIG_BT_SDC_ADDITIONAL_MEMORY];
@@ -920,6 +928,19 @@ static int configure_supported_features(void)
 	if (IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
 		sdc_support_flushable_acl_data();
 	}
+
+#if defined(CONFIG_BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS)
+	if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+		sdc_support_shorter_connection_intervals_central();
+	}
+	if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+		sdc_support_shorter_connection_intervals_peripheral();
+	}
+#endif
+
+#if defined(CONFIG_BT_CTLR_SDC_USE_GLOBAL_CHANNEL_MAP)
+	sdc_use_global_channel_map_on_connection();
+#endif
 
 	return 0;
 }

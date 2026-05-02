@@ -70,6 +70,9 @@ static bool command_generates_command_complete_event(uint16_t hci_opcode)
 #if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
 	case SDC_HCI_OPCODE_CMD_LE_FRAME_SPACE_UPDATE:
 #endif
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+	case SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST:
+#endif
 #if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
 	case SDC_HCI_OPCODE_CMD_LE_READ_ALL_REMOTE_FEATURES:
 #endif
@@ -642,6 +645,12 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 
 #if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
 	cmds->hci_le_frame_space_update = 1;
+#endif
+
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+	cmds->hci_le_connection_rate_request = 1;
+	cmds->hci_le_set_default_rate_parameters = 1;
+	cmds->hci_le_read_minimum_supported_connection_interval = 1;
 #endif
 
 #if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
@@ -1623,6 +1632,23 @@ static uint8_t le_controller_cmd_put(uint8_t const * const cmd,
 #if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
 	case SDC_HCI_OPCODE_CMD_LE_FRAME_SPACE_UPDATE:
 		return sdc_hci_cmd_le_frame_space_update((void *)cmd_params);
+#endif
+
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+	case SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST:
+		return sdc_hci_cmd_le_conn_rate_request((void *)cmd_params);
+	case SDC_HCI_OPCODE_CMD_LE_SET_DEFAULT_RATE_PARAMS:
+		return sdc_hci_cmd_le_set_default_rate_params((void *)cmd_params);
+	case SDC_HCI_OPCODE_CMD_LE_READ_MIN_SUPPORTED_CONN_INTERVAL: {
+		sdc_hci_cmd_le_read_min_supported_conn_interval_return_t *ret =
+			(void *)event_out_params;
+		uint8_t status = sdc_hci_cmd_le_read_min_supported_conn_interval(ret);
+		*param_length_out +=
+			sizeof(sdc_hci_cmd_le_read_min_supported_conn_interval_return_t) +
+			ret->num_groups *
+			sizeof(sdc_hci_le_read_min_supported_conn_interval_group_t);
+		return status;
+	}
 #endif
 
 #if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)

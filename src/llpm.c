@@ -27,6 +27,10 @@
 #include <zephyr/sys/byteorder.h>
 
 #include <sdc_hci_vs.h>
+#include <sdc_hci_cmd_controller_baseband.h>
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+#include <sdc_hci_cmd_le.h>
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(zmk_ble_llpm, CONFIG_ZMK_BLE_LLPM_LOG_LEVEL);
@@ -44,6 +48,12 @@ LOG_MODULE_REGISTER(zmk_ble_llpm, CONFIG_ZMK_BLE_LLPM_LOG_LEVEL);
  * Lets pairing / encryption handshake complete first.
  */
 #define LLPM_SWITCH_DELAY_MS    CONFIG_ZMK_BLE_LLPM_SWITCH_DELAY_MS
+
+/* Flush timeout in baseband slots (0.625ms each).
+ * 8 slots = 5ms — covers ~2 retransmit attempts at 2ms CI.
+ * Stale trackpoint data older than this is discarded.
+ */
+#define FLUSH_TIMEOUT_SLOTS     8
 
 static struct bt_conn *pending_conn;
 static struct k_work_delayable llpm_switch_work;
@@ -90,6 +100,104 @@ static int send_vs_conn_update(struct bt_conn *conn, uint32_t interval_us,
 	return err;
 }
 
+/*
+ * Set the automatic flush timeout on a connection.
+ * Activates the Flushable ACL Data feature (BLE 6.2) so stale
+ * trackpoint/mouse packets are discarded instead of retransmitted.
+ */
+static int send_flush_timeout(struct bt_conn *conn, uint16_t flush_slots)
+{
+	uint16_t conn_handle;
+	int err;
+
+	err = bt_hci_get_conn_handle(conn, &conn_handle);
+	if (err) {
+		LOG_ERR("Flush timeout: failed to get conn handle: %d", err);
+		return err;
+	}
+
+	struct net_buf *buf;
+
+	buf = bt_hci_cmd_create(SDC_HCI_OPCODE_CMD_CB_WRITE_AUTOMATIC_FLUSH_TIMEOUT,
+				sizeof(sdc_hci_cmd_cb_write_automatic_flush_timeout_t));
+	if (!buf) {
+		LOG_ERR("Flush timeout: failed to allocate HCI command buffer");
+		return -ENOMEM;
+	}
+
+	sdc_hci_cmd_cb_write_automatic_flush_timeout_t *cmd =
+		net_buf_add(buf, sizeof(*cmd));
+	cmd->conn_handle = conn_handle;
+	cmd->flush_timeout = flush_slots;
+
+	err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_CB_WRITE_AUTOMATIC_FLUSH_TIMEOUT, buf);
+	if (err) {
+		LOG_ERR("Write flush timeout failed: %d", err);
+	} else {
+		LOG_INF("Flush timeout set: %u slots (%.1f ms) on handle %u",
+			flush_slots, flush_slots * 0.625f, conn_handle);
+	}
+
+	return err;
+}
+
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+/*
+ * Send a standard BLE 6.2 Connection Rate Request to negotiate a
+ * sub-7.5ms connection interval via LL_CONNECTION_RATE_REQUEST PDUs.
+ *
+ * interval_us is the target CI in microseconds.
+ * BLE 6.2 Shorter CI uses 0.125ms (125µs) units.
+ */
+static int send_conn_rate_request(struct bt_conn *conn, uint32_t interval_us,
+				  uint16_t latency, uint16_t timeout)
+{
+	uint16_t conn_handle;
+	int err;
+
+	err = bt_hci_get_conn_handle(conn, &conn_handle);
+	if (err) {
+		LOG_ERR("Conn Rate Request: failed to get conn handle: %d", err);
+		return err;
+	}
+
+	/* Convert µs to 0.125ms units (BLE 6.2 Shorter CI encoding) */
+	uint16_t ci_val = (uint16_t)(interval_us / 125);
+
+	struct net_buf *buf;
+
+	buf = bt_hci_cmd_create(SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST,
+				sizeof(sdc_hci_cmd_le_conn_rate_request_t));
+	if (!buf) {
+		LOG_ERR("Conn Rate Request: failed to allocate HCI command buffer");
+		return -ENOMEM;
+	}
+
+	sdc_hci_cmd_le_conn_rate_request_t *cmd =
+		net_buf_add(buf, sizeof(*cmd));
+	cmd->conn_handle = conn_handle;
+	cmd->conn_interval_min = ci_val;
+	cmd->conn_interval_max = ci_val;
+	cmd->subrate_min = 1;
+	cmd->subrate_max = 1;
+	cmd->max_latency = latency;
+	cmd->continuation_number = 0;
+	cmd->supervision_timeout = timeout;
+	cmd->min_ce_length = 0;
+	cmd->max_ce_length = 0;
+
+	err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST, buf);
+	if (err) {
+		LOG_ERR("Conn Rate Request failed: %d", err);
+	} else {
+		LOG_INF("Conn Rate Request sent: CI=%u (0.125ms units, %u us), lat=%u, to=%u",
+			ci_val, interval_us, latency, timeout);
+	}
+
+	return err;
+}
+#endif /* CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE */
+
 static void llpm_switch_work_fn(struct k_work *work)
 {
 	struct bt_conn *conn = pending_conn;
@@ -134,6 +242,22 @@ static void llpm_switch_work_fn(struct k_work *work)
 		k_work_reschedule(&llpm_switch_work,
 				  K_MSEC(LLPM_SWITCH_DELAY_MS));
 		return;
+	}
+
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+	/*
+	 * Also issue a standard Connection Rate Request so the link
+	 * negotiates via LL_CONNECTION_RATE_REQUEST PDUs.  If the peer
+	 * supports BLE 6.2 Shorter CI, this will take over; otherwise
+	 * the VS path already succeeded above and this is a harmless
+	 * no-op that the controller will reject gracefully.
+	 */
+	send_conn_rate_request(conn, target_us, 0,
+			       CONFIG_ZMK_BLE_LLPM_SUPERVISION_TIMEOUT);
+#endif
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
+		send_flush_timeout(conn, FLUSH_TIMEOUT_SLOTS);
 	}
 
 done:

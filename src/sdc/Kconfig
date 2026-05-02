@@ -267,6 +267,33 @@ config BT_CTLR_LE_FLUSHABLE_ACL_DATA
 	  for mouse/trackpoint data on the split link where freshness
 	  matters more than reliability.
 
+config BT_CTLR_SDC_USE_GLOBAL_CHANNEL_MAP
+	bool "Use global channel map on connection"
+	default y if BT_CTLR_SDC
+	help
+	  New connections inherit the host's global channel classification
+	  immediately instead of starting with all 37 channels enabled.
+	  Pairs well with the QoS channel map filter module.
+
+config BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS
+	bool "Shorter Connection Intervals (BLE 6.2)"
+	depends on BT_CTLR_EXTENDED_FEAT_SET
+	depends on BT_CTLR_SUBRATING
+	help
+	  Enable BLE 6.2 Shorter Connection Intervals support.
+	  Allows sub-7.5ms connection intervals via standard
+	  LL_CONNECTION_RATE_REQUEST PDUs instead of vendor-specific
+	  LLPM commands. Requires Extended Feature Set and Connection
+	  Subrating to be enabled.
+
+config BT_CTLR_SDC_CONNECTION_RATE_UPDATE
+	bool "Connection Rate Update (BLE 6.2)"
+	depends on BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS
+	help
+	  Enable BLE 6.2 Connection Rate Update HCI commands.
+	  Provides LE_Connection_Rate_Request, LE_Set_Default_Rate_Parameters,
+	  and LE_Read_Minimum_Supported_Connection_Interval commands.
+
 # Reopen the flash driver's radio sync choice to inject the MPSL backend.
 # The choice is originally defined in zephyr/drivers/flash/Kconfig.nrf with
 # TICKER (for BT_LL_SW_SPLIT) and NONE.  We add a third option that uses

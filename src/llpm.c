@@ -329,6 +329,97 @@ BT_CONN_CB_DEFINE(llpm_conn_cb) = {
 	.le_param_updated = le_param_updated_cb,
 };
 
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+/*
+ * Set default rate parameters so the SDC proposes Shorter CI
+ * automatically for every future central connection.
+ */
+static void set_default_rate_params(void)
+{
+	uint16_t ci_val = (uint16_t)(CONFIG_ZMK_BLE_LLPM_INTERVAL_US / 125);
+
+	struct net_buf *buf;
+
+	buf = bt_hci_cmd_create(SDC_HCI_OPCODE_CMD_LE_SET_DEFAULT_RATE_PARAMS,
+				sizeof(sdc_hci_cmd_le_set_default_rate_params_t));
+	if (!buf) {
+		LOG_ERR("Set Default Rate Params: alloc failed");
+		return;
+	}
+
+	sdc_hci_cmd_le_set_default_rate_params_t *cmd =
+		net_buf_add(buf, sizeof(*cmd));
+	cmd->conn_interval_min = ci_val;
+	cmd->conn_interval_max = ci_val;
+	cmd->subrate_min = 1;
+	cmd->subrate_max = 1;
+	cmd->max_latency = 0;
+	cmd->continuation_number = 0;
+	cmd->supervision_timeout = CONFIG_ZMK_BLE_LLPM_SUPERVISION_TIMEOUT;
+	cmd->min_ce_length = 0;
+	cmd->max_ce_length = 0;
+
+	int err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_LE_SET_DEFAULT_RATE_PARAMS,
+				  buf);
+	if (err) {
+		LOG_ERR("Set Default Rate Params failed: %d", err);
+	} else {
+		LOG_INF("Default Rate Params set: CI=%u (0.125ms units, %u us)",
+			ci_val, CONFIG_ZMK_BLE_LLPM_INTERVAL_US);
+	}
+}
+
+/*
+ * Query and log the minimum supported connection interval and
+ * supported interval groups from the SDC.  One-time diagnostic.
+ */
+static void log_min_supported_conn_interval(void)
+{
+	struct net_buf *buf, *rsp = NULL;
+	int err;
+
+	buf = bt_hci_cmd_create(
+		SDC_HCI_OPCODE_CMD_LE_READ_MIN_SUPPORTED_CONN_INTERVAL, 0);
+	if (!buf) {
+		LOG_ERR("Read Min Supported CI: alloc failed");
+		return;
+	}
+
+	err = bt_hci_cmd_send_sync(
+		SDC_HCI_OPCODE_CMD_LE_READ_MIN_SUPPORTED_CONN_INTERVAL,
+		buf, &rsp);
+	if (err || !rsp) {
+		LOG_ERR("Read Min Supported CI failed: %d", err);
+		return;
+	}
+
+	/* Skip Command Complete header (3 bytes: ncmd, opcode) + status (1) */
+	struct net_buf *evt = rsp;
+	const uint8_t *data = evt->data + sizeof(struct bt_hci_evt_cmd_complete)
+			      + sizeof(struct bt_hci_evt_cc_status);
+	uint8_t min_ci = data[0];
+	uint8_t num_groups = data[1];
+
+	LOG_INF("Min supported CI: %u (0.125ms units = %u us), %u group(s)",
+		min_ci, min_ci * 125, num_groups);
+
+	const uint8_t *gp = &data[2];
+
+	for (uint8_t i = 0; i < num_groups && i < 8; i++) {
+		uint16_t gmin = sys_get_le16(&gp[i * 6]);
+		uint16_t gmax = sys_get_le16(&gp[i * 6 + 2]);
+		uint16_t gstride = sys_get_le16(&gp[i * 6 + 4]);
+
+		LOG_INF("  Group %u: min=%u max=%u stride=%u "
+			"(%.3f–%.3f ms, step %.3f ms)",
+			i, gmin, gmax, gstride,
+			gmin * 0.125f, gmax * 0.125f, gstride * 0.125f);
+	}
+
+	net_buf_unref(rsp);
+}
+#endif /* CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE */
+
 static int llpm_init(void)
 {
 	k_work_init_delayable(&llpm_switch_work, llpm_switch_work_fn);
@@ -336,6 +427,11 @@ static int llpm_init(void)
 	LOG_INF("LLPM module initialized (target CI=%u us, delay=%u ms)",
 		CONFIG_ZMK_BLE_LLPM_INTERVAL_US,
 		CONFIG_ZMK_BLE_LLPM_SWITCH_DELAY_MS);
+
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+	set_default_rate_params();
+	log_min_supported_conn_interval();
+#endif
 
 	return 0;
 }

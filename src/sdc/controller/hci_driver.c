@@ -24,6 +24,9 @@
 #include <sdc_soc.h>
 #include <sdc_hci.h>
 #include <sdc_hci_vs.h>
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+#include <sdc_hci_cmd_le.h>
+#endif
 #include <mpsl.h>
 #include <mpsl/mpsl_work.h>
 #include <mpsl/mpsl_lib.h>
@@ -598,6 +601,19 @@ static int event_packet_process(const struct device *dev, uint8_t *hci_buf)
 
 		LOG_DBG("LE Meta Event (0x%02x), len (%u)",
 		       me->subevent, hdr->len);
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+		if (me->subevent == SDC_HCI_SUBEVENT_LE_CONN_RATE_CHANGE) {
+			const sdc_hci_subevent_le_conn_rate_change_t *ev =
+				(const void *)&hci_buf[3];
+			LOG_INF("Conn Rate Change: status=0x%02x handle=%u "
+				"CI=%u subrate=%u lat=%u cn=%u to=%u",
+				ev->status, ev->conn_handle,
+				ev->conn_interval, ev->subrate_factor,
+				ev->peripheral_latency,
+				ev->continuation_number,
+				ev->supervision_timeout);
+		}
+#endif
 	} else if (hdr->evt == BT_HCI_EVT_CMD_COMPLETE) {
 		struct bt_hci_evt_cmd_complete *cc = (void *)&hci_buf[2];
 		struct bt_hci_evt_cc_status *ccs = (void *)&hci_buf[5];

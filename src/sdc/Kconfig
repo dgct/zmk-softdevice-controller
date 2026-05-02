@@ -213,12 +213,51 @@ config BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 	  packet from the central is received.
 
 # ============================================================================
-# Logging
+# BLE 6.0/6.2 Features (nrfxlib >= v3.2.0)
 # ============================================================================
 
-# ============================================================================
-# Flash Radio Synchronization (MPSL timeslots)
-# ============================================================================
+config BT_CTLR_EXTENDED_FEAT_SET
+	bool "Extended Feature Set"
+	depends on BT_CONN
+	help
+	  Enable BLE Extended Feature Set support. Prerequisite for
+	  Frame Space Update and other BLE 6.0+ negotiation features.
+	  Adds per-link memory for extended feature page exchange.
+
+config BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE
+	int "Max extended feature pages to read from remote"
+	depends on BT_CTLR_EXTENDED_FEAT_SET
+	default 1
+	range 1 10
+	help
+	  Maximum number of extended feature pages to read from
+	  a remote device. Each page adds 24 bytes per link.
+
+config BT_CTLR_FRAME_SPACE_UPDATE
+	bool "Frame Space Update (BLE 6.0)"
+	depends on BT_CONN
+	help
+	  Enable BLE 6.0 Frame Space Update, which allows negotiating
+	  the inter-frame space between packets. On a split link this
+	  can tighten timing to allow more retransmit opportunities
+	  within a single connection event.
+
+config BT_CTLR_SDC_ENABLE_LOWEST_FRAME_SPACE
+	bool "Enable lowest frame space"
+	depends on BT_CTLR_FRAME_SPACE_UPDATE
+	help
+	  Request the lowest possible frame space. Requires the same
+	  PHY in both TX and RX directions.
+
+config BT_CTLR_LE_FLUSHABLE_ACL_DATA
+	bool "Flushable ACL Data (BLE 6.2)"
+	depends on BT_CONN
+	help
+	  Enable BLE 6.2 Flushable ACL Data support. Allows setting
+	  an automatic flush timeout per connection so stale ACL data
+	  is discarded instead of retransmitted indefinitely. Useful
+	  for mouse/trackpoint data on the split link where freshness
+	  matters more than reliability.
 
 # Reopen the flash driver's radio sync choice to inject the MPSL backend.
 # The choice is originally defined in zephyr/drivers/flash/Kconfig.nrf with

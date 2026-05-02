@@ -67,6 +67,12 @@ static bool command_generates_command_complete_event(uint16_t hci_opcode)
 	case SDC_HCI_OPCODE_CMD_LE_CREATE_BIG_TEST:
 	case SDC_HCI_OPCODE_CMD_LE_TERMINATE_BIG:
 	case SDC_HCI_OPCODE_CMD_LE_SUBRATE_REQUEST:
+#if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
+	case SDC_HCI_OPCODE_CMD_LE_FRAME_SPACE_UPDATE:
+#endif
+#if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
+	case SDC_HCI_OPCODE_CMD_LE_READ_ALL_REMOTE_FEATURES:
+#endif
 #if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
 	case SDC_HCI_OPCODE_CMD_LE_CS_READ_REMOTE_SUPPORTED_CAPABILITIES:
 	case SDC_HCI_OPCODE_CMD_LE_CS_SECURITY_ENABLE:
@@ -364,6 +370,11 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 	cmds->hci_read_rssi = 1;
 #endif
 
+#if defined(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)
+	cmds->hci_read_automatic_flush_timeout = 1;
+	cmds->hci_write_automatic_flush_timeout = 1;
+#endif
+
 #if defined(CONFIG_BT_CTLR_LE_ENC) && defined(CONFIG_BT_CTLR_LE_PING)
 	cmds->hci_set_event_mask_page_2 = 1;
 #endif
@@ -628,6 +639,15 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 #endif
 	cmds->hci_le_subrate_request_command = 1;
 #endif /* CONFIG_BT_CTLR_SUBRATING */
+
+#if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
+	cmds->hci_le_frame_space_update = 1;
+#endif
+
+#if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
+	cmds->hci_le_read_all_local_supported_features = 1;
+	cmds->hci_le_read_all_remote_features = 1;
+#endif
 #if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
 	cmds->hci_le_cs_read_remote_fae_table = 1;
 	cmds->hci_le_cs_write_cached_remote_fae_table = 1;
@@ -784,6 +804,10 @@ void hci_internal_le_supported_features(
 #if defined(CONFIG_BT_CTLR_SDC_LE_POWER_CLASS_1)
 	features->params.le_Power_class_1 = 1;
 #endif /* CONFIG_BT_CTLR_SDC_LE_POWER_CLASS_1 */
+
+#if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
+	features->params.ll_extended_feature_set = 1;
+#endif
 }
 
 static void le_read_supported_states(uint8_t *buf)
@@ -924,6 +948,19 @@ static uint8_t controller_and_baseband_cmd_put(uint8_t const * const cmd,
 				sizeof(sdc_hci_cmd_cb_write_authenticated_payload_timeout_return_t);
 		return sdc_hci_cmd_cb_write_authenticated_payload_timeout((void *)cmd_params,
 									  (void *)event_out_params);
+#endif
+
+#if defined(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)
+	case SDC_HCI_OPCODE_CMD_CB_READ_AUTOMATIC_FLUSH_TIMEOUT:
+		*param_length_out +=
+				sizeof(sdc_hci_cmd_cb_read_automatic_flush_timeout_return_t);
+		return sdc_hci_cmd_cb_read_automatic_flush_timeout((void *)cmd_params,
+								     (void *)event_out_params);
+	case SDC_HCI_OPCODE_CMD_CB_WRITE_AUTOMATIC_FLUSH_TIMEOUT:
+		*param_length_out +=
+				sizeof(sdc_hci_cmd_cb_write_automatic_flush_timeout_return_t);
+		return sdc_hci_cmd_cb_write_automatic_flush_timeout((void *)cmd_params,
+								      (void *)event_out_params);
 #endif
 	default:
 		return BT_HCI_ERR_UNKNOWN_CMD;
@@ -1582,6 +1619,21 @@ static uint8_t le_controller_cmd_put(uint8_t const * const cmd,
 		return sdc_hci_cmd_le_cs_test_end();
 #endif /* CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST */
 #endif /* CONFIG_BT_CTLR_CHANNEL_SOUNDING */
+
+#if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
+	case SDC_HCI_OPCODE_CMD_LE_FRAME_SPACE_UPDATE:
+		return sdc_hci_cmd_le_frame_space_update((void *)cmd_params);
+#endif
+
+#if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
+	case SDC_HCI_OPCODE_CMD_LE_READ_ALL_REMOTE_FEATURES:
+		return sdc_hci_cmd_le_read_all_remote_features((void *)cmd_params);
+	case SDC_HCI_OPCODE_CMD_LE_READ_ALL_LOCAL_SUPPORTED_FEATURES:
+		*param_length_out +=
+			sizeof(sdc_hci_cmd_le_read_all_local_supported_features_return_t);
+		return sdc_hci_cmd_le_read_all_local_supported_features(
+			(void *)event_out_params);
+#endif
 
 	default:
 		return BT_HCI_ERR_UNKNOWN_CMD;

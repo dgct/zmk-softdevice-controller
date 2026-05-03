@@ -57,6 +57,8 @@ LOG_MODULE_REGISTER(zmk_ble_llpm, CONFIG_ZMK_BLE_LLPM_LOG_LEVEL);
 
 static struct bt_conn *pending_conn;
 static struct k_work_delayable llpm_switch_work;
+static int llpm_retries;
+#define LLPM_MAX_RETRIES 10
 
 /*
  * Send the vendor-specific connection update via HCI.
@@ -238,7 +240,14 @@ static void llpm_switch_work_fn(struct k_work *work)
 	err = send_vs_conn_update(conn, target_us, 0,
 				  CONFIG_ZMK_BLE_LLPM_SUPERVISION_TIMEOUT);
 	if (err) {
-		LOG_WRN("LLPM switch failed: %d — will retry", err);
+		llpm_retries++;
+		if (llpm_retries >= LLPM_MAX_RETRIES) {
+			LOG_ERR("LLPM switch failed after %d retries, giving up",
+				LLPM_MAX_RETRIES);
+			goto done;
+		}
+		LOG_WRN("LLPM switch failed: %d — will retry (%d/%d)",
+			err, llpm_retries, LLPM_MAX_RETRIES);
 		k_work_reschedule(&llpm_switch_work,
 				  K_MSEC(LLPM_SWITCH_DELAY_MS));
 		return;
@@ -283,6 +292,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
 	LOG_INF("Central connection established — scheduling LLPM switch");
 	pending_conn = conn;
+	llpm_retries = 0;
 	k_work_reschedule(&llpm_switch_work, K_MSEC(LLPM_SWITCH_DELAY_MS));
 }
 

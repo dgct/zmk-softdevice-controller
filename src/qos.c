@@ -50,6 +50,7 @@ static struct chmap_instance *chmap_inst;
 static atomic_t processing;
 static atomic_t crc_errors_seen;
 static atomic_t burst_requested;
+static atomic_t reinit_requested;
 static bool reporting_enabled;
 static uint32_t current_interval_ms = QOS_INTERVAL_FAST;
 static enum zmk_activity_state last_activity_state = ZMK_ACTIVITY_SLEEP;
@@ -66,6 +67,8 @@ static bool survey_enabled;
 static struct bt_conn *host_conn;
 static uint8_t last_applied_map[5];
 #endif
+
+static int apply_filter_params(void);
 
 /*
  * VS HCI event callback — called from the BT RX thread whenever the
@@ -222,17 +225,25 @@ static int read_host_chan_map(uint8_t out[5])
 		return -ENOTCONN;
 	}
 
+	/* Take a ref to prevent concurrent disconnected_cb from
+	 * releasing the conn object while we use it. */
+	conn = bt_conn_ref(conn);
+	if (!conn) {
+		return -ENOTCONN;
+	}
+
 	uint16_t handle;
 
 	err = bt_hci_get_conn_handle(conn, &handle);
 	if (err) {
-		return err;
+		goto out;
 	}
 
 	buf = bt_hci_cmd_create(BT_HCI_OP_LE_READ_CHAN_MAP,
 				sizeof(struct bt_hci_cp_le_read_chan_map));
 	if (!buf) {
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto out;
 	}
 
 	struct bt_hci_cp_le_read_chan_map *cp = net_buf_add(buf,
@@ -241,7 +252,7 @@ static int read_host_chan_map(uint8_t out[5])
 
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_LE_READ_CHAN_MAP, buf, &rsp);
 	if (err) {
-		return err;
+		goto out;
 	}
 
 	struct bt_hci_rp_le_read_chan_map *rp = (void *)rsp->data;
@@ -253,6 +264,8 @@ static int read_host_chan_map(uint8_t out[5])
 	}
 
 	net_buf_unref(rsp);
+out:
+	bt_conn_unref(conn);
 	return err;
 }
 
@@ -353,6 +366,29 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 		}
 
 		atomic_set(&processing, true);
+
+		/* Handle reinit request from wake listener — must happen
+		 * inside the processing gate so chmap_filter_process and
+		 * chmap_filter_instance_init can't run concurrently. */
+		if (atomic_cas(&reinit_requested, true, false)) {
+			int rinit_err = chmap_filter_instance_init(chmap_inst,
+								   sizeof(chmap_inst_buf));
+			if (rinit_err) {
+				LOG_ERR("chmap_filter re-init failed: %d", rinit_err);
+			} else {
+				apply_filter_params();
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+				memset(last_applied_map, 0, sizeof(last_applied_map));
+#endif
+			}
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+			memset(survey_keepout, 0, sizeof(survey_keepout));
+			memset(survey_blocked_map, 0xFF, 4);
+			survey_blocked_map[4] = 0x1F;
+			atomic_set(&survey_data_ready, false);
+#endif
+		}
+
 		update_channel_map = chmap_filter_process(chmap_inst);
 		atomic_set(&processing, false);
 
@@ -605,38 +641,12 @@ static int qos_activity_listener(const zmk_event_t *eh)
 
 	if (ev->state == ZMK_ACTIVITY_ACTIVE && prev == ZMK_ACTIVITY_SLEEP) {
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_REINIT_ON_WAKE)
-		LOG_INF("QoS: wake from sleep, re-initializing filter");
-		/*
-		 * Gate CRC updates during re-init. The `processing` flag is
-		 * checked by on_vs_evt() and causes it to skip
-		 * chmap_filter_crc_update(), preventing races with the
-		 * instance being reset underneath.
-		 */
-		atomic_set(&processing, true);
-
-		int err = chmap_filter_instance_init(chmap_inst,
-						     sizeof(chmap_inst_buf));
-		if (err) {
-			LOG_ERR("chmap_filter re-init failed: %d", err);
-		} else {
-			apply_filter_params();
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
-			/* Force host_map_changed() to detect a difference on
-			 * the first post-wake iteration so the all-channels
-			 * map from the fresh filter is applied immediately. */
-			memset(last_applied_map, 0, sizeof(last_applied_map));
-#endif
-		}
-
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
-		/* Clear survey state so stale pre-sleep blocks don't persist. */
-		memset(survey_keepout, 0, sizeof(survey_keepout));
-		memset(survey_blocked_map, 0xFF, 4);
-		survey_blocked_map[4] = 0x1F;
-		atomic_set(&survey_data_ready, false);
-#endif
-
-		atomic_set(&processing, false);
+		LOG_INF("QoS: wake from sleep, requesting filter re-init");
+		/* Signal the QoS thread to re-init inside its own
+		 * processing gate, avoiding concurrent access to
+		 * chmap_inst from the listener (sysworkq) and the
+		 * QoS thread. */
+		atomic_set(&reinit_requested, true);
 #else
 		LOG_INF("QoS: wake from sleep, requesting burst");
 #endif

@@ -309,6 +309,67 @@ config ZMK_BLE_QOS_REINIT_ON_WAKE
 	  37 channels enabled. The tuned parameters (min_channel_count,
 	  eval_keepout_duration) are re-applied after re-init.
 
+config ZMK_BLE_QOS_CHANNEL_SURVEY
+	bool "Channel survey energy-based blocking"
+	select BT_CTLR_SDC_QOS_CHANNEL_SURVEY
+	help
+	  Enable SDC QoS Channel Survey as a supplemental blocking layer.
+	  The survey measures RF energy on each BLE data channel and blocks
+	  channels above an energy threshold, providing early warning of
+	  WiFi or other 2.4 GHz interference before CRC errors accumulate.
+
+	  Survey blocks use a short keepout (tens of seconds) so false
+	  positives self-correct quickly. True positives are independently
+	  confirmed and promoted to long-term blocks by the CRC-based
+	  chmap_filter.
+
+	  The survey runs at fourth scheduling priority in the SDC and may
+	  produce sparse reports under heavy connection load. This is
+	  handled gracefully — if no reports arrive, the survey layer has
+	  no effect.
+
+if ZMK_BLE_QOS_CHANNEL_SURVEY
+
+config ZMK_BLE_QOS_SURVEY_INTERVAL_US
+	int "Survey measurement target interval (microseconds)"
+	default 5000000
+	range 100000 30000000
+	help
+	  Target average interval between channel survey measurements.
+	  The SDC will attempt to schedule measurements at this rate, but
+	  due to fourth scheduling priority, actual intervals may be longer.
+
+	  5000000 (5 seconds) is a reasonable starting point. Under dual
+	  7.5ms connection interval load, reports may arrive less frequently.
+
+config ZMK_BLE_QOS_SURVEY_ENERGY_THRESHOLD
+	int "Energy threshold for blocking (dBm)"
+	default -70
+	range -100 -30
+	help
+	  Channels with measured energy above this threshold (in dBm) are
+	  blocked by the survey layer. The threshold should be set above the
+	  noise floor (~-90 dBm) but below typical WiFi signal levels.
+
+	  -70 dBm is a conservative starting point. WiFi at 2-3 meters is
+	  typically -50 to -65 dBm. Tune empirically using the debug log
+	  output of raw survey energy values.
+
+config ZMK_BLE_QOS_SURVEY_KEEPOUT_CYCLES
+	int "Survey block keepout duration (processing cycles)"
+	default 60
+	range 10 300
+	help
+	  Number of QoS processing cycles a survey-blocked channel must wait
+	  before being re-evaluated. At the 1-second baseline interval this
+	  is approximately 60 seconds.
+
+	  Short keepout allows false positives to self-correct quickly while
+	  true positives are independently promoted to long-term blocks
+	  (~2000 cycles) by the CRC-based chmap_filter.
+
+endif # ZMK_BLE_QOS_CHANNEL_SURVEY
+
 module = ZMK_BLE_QOS
 module-str = zmk_ble_qos
 source "subsys/logging/Kconfig.template.log_config"

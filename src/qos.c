@@ -54,6 +54,14 @@ static bool reporting_enabled;
 static uint32_t current_interval_ms = QOS_INTERVAL_FAST;
 static enum zmk_activity_state last_activity_state = ZMK_ACTIVITY_SLEEP;
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+static int8_t survey_energy[40];
+static atomic_t survey_data_ready;
+static uint8_t survey_blocked_map[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0x1F};
+static uint16_t survey_keepout[37];
+static bool survey_enabled;
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 static struct bt_conn *host_conn;
 static uint8_t last_applied_map[5];
@@ -94,6 +102,15 @@ static bool on_vs_evt(struct net_buf_simple *buf)
 			atomic_set(&crc_errors_seen, true);
 		}
 		return true;
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+	case SDC_HCI_SUBEVENT_VS_QOS_CHANNEL_SURVEY_REPORT: {
+		sdc_hci_subevent_vs_qos_channel_survey_report_t *srv =
+			(void *)buf->data;
+		memcpy(survey_energy, srv->channel_energy, sizeof(survey_energy));
+		atomic_set(&survey_data_ready, true);
+		return true;
+	}
+#endif
 	default:
 		return false;
 	}
@@ -131,7 +148,44 @@ static int enable_conn_event_reporting(void)
 	return err;
 }
 
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+/*
+ * Enable QoS channel survey via VS HCI command.
+ * The survey measures RF energy on each BLE data channel and generates
+ * periodic reports at approximately the configured interval.
+ */
+static int enable_channel_survey(void)
+{
+	struct net_buf *buf;
+	int err;
+
+	buf = bt_hci_cmd_create(SDC_HCI_OPCODE_CMD_VS_QOS_CHANNEL_SURVEY_ENABLE,
+				sizeof(sdc_hci_cmd_vs_qos_channel_survey_enable_t));
+	if (!buf) {
+		LOG_ERR("Failed to allocate HCI command buffer for survey");
+		return -ENOMEM;
+	}
+
+	sdc_hci_cmd_vs_qos_channel_survey_enable_t *cmd = net_buf_add(buf,
+		sizeof(sdc_hci_cmd_vs_qos_channel_survey_enable_t));
+	cmd->enable = 1;
+	cmd->interval_us = CONFIG_ZMK_BLE_QOS_SURVEY_INTERVAL_US;
+
+	err = bt_hci_cmd_send_sync(SDC_HCI_OPCODE_CMD_VS_QOS_CHANNEL_SURVEY_ENABLE,
+				   buf, NULL);
+	if (err) {
+		LOG_ERR("Failed to enable channel survey: %d", err);
+	} else {
+		LOG_INF("Channel survey enabled (interval %u us)",
+			CONFIG_ZMK_BLE_QOS_SURVEY_INTERVAL_US);
+	}
+
+	return err;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
+    IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
 /*
  * Count set bits in a 5-byte channel map (37 data channels).
  */
@@ -150,7 +204,9 @@ static int chmap_popcount(const uint8_t map[5])
 	/* Only the lower 5 bits of map[4] are data channels. */
 	return count;
 }
+#endif
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 /*
  * Read the channel map of the host (peripheral-role) connection via HCI.
  * Returns the map macOS/Windows/Linux assigned via its AFH algorithm.
@@ -303,14 +359,95 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 		uint8_t *chmap = chmap_filter_suggested_map_get(chmap_inst);
 		uint8_t final_map[5];
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+		/*
+		 * Survey post-filter: apply energy-based blocks on top of
+		 * the chmap_filter output. Uses a separate short keepout so
+		 * false positives self-correct in ~60s while true positives
+		 * are independently promoted by the CRC filter long-term.
+		 */
+		uint8_t pre_merge_map[5];
+		bool survey_changed = false;
+
+		/* Process new survey data if available. */
+		if (atomic_cas(&survey_data_ready, true, false)) {
+			int8_t local_energy[40];
+
+			memcpy(local_energy, survey_energy, sizeof(local_energy));
+
+			for (int ch = 0; ch < 37; ch++) {
+				if (local_energy[ch] == 127) {
+					/* No measurement for this channel. */
+					continue;
+				}
+				if (local_energy[ch] >
+				    CONFIG_ZMK_BLE_QOS_SURVEY_ENERGY_THRESHOLD) {
+					if (survey_keepout[ch] == 0) {
+						LOG_INF("Survey: block ch %d "
+							"(energy %d dBm)",
+							ch, local_energy[ch]);
+					}
+					survey_keepout[ch] =
+						CONFIG_ZMK_BLE_QOS_SURVEY_KEEPOUT_CYCLES;
+				}
+			}
+
+			LOG_DBG("Survey energy received");
+		}
+
+		/* Decrement keepout counters and rebuild blocked map. */
+		uint8_t new_blocked_map[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0x1F};
+
+		for (int ch = 0; ch < 37; ch++) {
+			if (survey_keepout[ch] > 0) {
+				survey_keepout[ch]--;
+				/* Clear bit = blocked. */
+				new_blocked_map[ch / 8] &=
+					~(1U << (ch % 8));
+				if (survey_keepout[ch] == 0) {
+					LOG_INF("Survey: unblock ch %d", ch);
+				}
+			}
+		}
+
+		if (memcmp(new_blocked_map, survey_blocked_map, 5) != 0) {
+			memcpy(survey_blocked_map, new_blocked_map, 5);
+			survey_changed = true;
+		}
+
+		/* Apply survey subtraction to filter output. */
+		for (int i = 0; i < 5; i++) {
+			pre_merge_map[i] = chmap[i] & survey_blocked_map[i];
+		}
+
+		/* Floor check: don't let survey starve the channel map. */
+		if (chmap_popcount(pre_merge_map) <
+		    CONFIG_ZMK_BLE_QOS_MIN_CHANNEL_COUNT) {
+			LOG_WRN("Survey would leave %d channels (min %d), "
+				"using filter-only map",
+				chmap_popcount(pre_merge_map),
+				CONFIG_ZMK_BLE_QOS_MIN_CHANNEL_COUNT);
+			memcpy(pre_merge_map, chmap, 5);
+			survey_changed = false;
+		}
+
+		if (survey_changed) {
+			update_channel_map = true;
+		}
+
+		const uint8_t *effective_map = pre_merge_map;
+#else
+		const uint8_t *effective_map = chmap;
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 		if (update_channel_map) {
-			merge_host_map(chmap, final_map);
-		} else if (host_map_changed(chmap, final_map)) {
+			merge_host_map(effective_map, final_map);
+		} else if (host_map_changed(effective_map, final_map)) {
 			update_channel_map = true;
 		}
 #else
-		memcpy(final_map, chmap, 5);
+		memcpy(final_map, effective_map, 5);
 #endif
 
 		if (!update_channel_map) {
@@ -359,6 +496,15 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 			reporting_enabled = true;
 		}
 	}
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+	if (!survey_enabled) {
+		int ret = enable_channel_survey();
+		if (!ret) {
+			survey_enabled = true;
+		}
+	}
+#endif
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
@@ -481,6 +627,14 @@ static int qos_activity_listener(const zmk_event_t *eh)
 			memset(last_applied_map, 0, sizeof(last_applied_map));
 #endif
 		}
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
+		/* Clear survey state so stale pre-sleep blocks don't persist. */
+		memset(survey_keepout, 0, sizeof(survey_keepout));
+		memset(survey_blocked_map, 0xFF, 4);
+		survey_blocked_map[4] = 0x1F;
+		atomic_set(&survey_data_ready, false);
+#endif
 
 		atomic_set(&processing, false);
 #else

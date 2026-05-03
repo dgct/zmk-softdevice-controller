@@ -574,6 +574,10 @@ static bool event_packet_is_discardable(const uint8_t *hci_buf)
 			return true;
 		case SDC_HCI_SUBEVENT_VS_CONN_ANCHOR_POINT_UPDATE_REPORT:
 			return true;
+#ifdef CONFIG_BT_CTLR_SDC_QOS_CHANNEL_SURVEY
+		case SDC_HCI_SUBEVENT_VS_QOS_CHANNEL_SURVEY_REPORT:
+			return true;
+#endif
 		default:
 			return false;
 		}

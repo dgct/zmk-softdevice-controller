@@ -204,6 +204,15 @@ config BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 	  Provides per-connection-event CRC ok/error counts per channel,
 	  used by the BLE QoS channel map filter module.
 
+config BT_CTLR_SDC_QOS_CHANNEL_SURVEY
+	bool "QoS channel survey"
+	help
+	  Enable SoftDevice Controller QoS channel survey.
+	  Measures RF energy on each BLE data channel independently of
+	  active connections. Reports arrive as VS subevent 0x81 with
+	  per-channel energy in dBm. Runs at fourth scheduling priority
+	  so reports may be sparse under heavy connection load.
+
 config BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 	bool "Connection anchor point update reports"
 	help

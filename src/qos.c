@@ -54,6 +54,11 @@ static bool reporting_enabled;
 static uint32_t current_interval_ms = QOS_INTERVAL_FAST;
 static enum zmk_activity_state last_activity_state = ZMK_ACTIVITY_SLEEP;
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+static struct bt_conn *host_conn;
+static uint8_t last_applied_map[5];
+#endif
+
 /*
  * VS HCI event callback — called from the BT RX thread whenever the
  * SoftDevice Controller generates a vendor-specific event.
@@ -126,6 +131,121 @@ static int enable_conn_event_reporting(void)
 	return err;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+/*
+ * Count set bits in a 5-byte channel map (37 data channels).
+ */
+static int chmap_popcount(const uint8_t map[5])
+{
+	int count = 0;
+
+	for (int i = 0; i < 5; i++) {
+		uint8_t b = map[i];
+
+		while (b) {
+			count++;
+			b &= b - 1;
+		}
+	}
+	/* Only the lower 5 bits of map[4] are data channels. */
+	return count;
+}
+
+/*
+ * Read the channel map of the host (peripheral-role) connection via HCI.
+ * Returns the map macOS/Windows/Linux assigned via its AFH algorithm.
+ */
+static int read_host_chan_map(uint8_t out[5])
+{
+	struct bt_conn *conn = host_conn;
+	struct net_buf *buf;
+	struct net_buf *rsp = NULL;
+	int err;
+
+	if (!conn) {
+		return -ENOTCONN;
+	}
+
+	uint16_t handle;
+
+	err = bt_hci_get_conn_handle(conn, &handle);
+	if (err) {
+		return err;
+	}
+
+	buf = bt_hci_cmd_create(BT_HCI_OP_LE_READ_CHAN_MAP,
+				sizeof(struct bt_hci_cp_le_read_chan_map));
+	if (!buf) {
+		return -ENOMEM;
+	}
+
+	struct bt_hci_cp_le_read_chan_map *cp = net_buf_add(buf,
+		sizeof(struct bt_hci_cp_le_read_chan_map));
+	cp->handle = sys_cpu_to_le16(handle);
+
+	err = bt_hci_cmd_send_sync(BT_HCI_OP_LE_READ_CHAN_MAP, buf, &rsp);
+	if (err) {
+		return err;
+	}
+
+	struct bt_hci_rp_le_read_chan_map *rp = (void *)rsp->data;
+
+	if (rp->status) {
+		err = -EIO;
+	} else {
+		memcpy(out, rp->ch_map, 5);
+	}
+
+	net_buf_unref(rsp);
+	return err;
+}
+
+/*
+ * Merge the QoS filter's suggested map with the host-link channel map.
+ * Always populates merged[5]. Falls back to qos_map if the host map
+ * is unavailable or the intersection is too narrow.
+ */
+static void merge_host_map(const uint8_t *qos_map, uint8_t merged[5])
+{
+	uint8_t host_map[5];
+
+	if (read_host_chan_map(host_map)) {
+		memcpy(merged, qos_map, 5);
+		return;
+	}
+
+	for (int i = 0; i < 5; i++) {
+		merged[i] = qos_map[i] & host_map[i];
+	}
+
+	int count = chmap_popcount(merged);
+
+	if (count < CONFIG_ZMK_BLE_QOS_HOST_MAP_MIN_CHANNELS) {
+		LOG_WRN("Host map merge would leave %d channels (min %d), skipping",
+			count, CONFIG_ZMK_BLE_QOS_HOST_MAP_MIN_CHANNELS);
+		memcpy(merged, qos_map, 5);
+		return;
+	}
+
+	LOG_INF("Host map merged: %d channels", count);
+}
+
+/*
+ * Check if the host channel map changed since the last applied map.
+ * Populates merged[5] with the current merge result.
+ */
+static bool host_map_changed(const uint8_t *qos_map, uint8_t merged[5])
+{
+	if (!host_conn) {
+		return false;
+	}
+
+	merge_host_map(qos_map, merged);
+
+	return memcmp(merged, last_applied_map, 5) != 0;
+}
+#endif /* CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE */
+
 /*
  * QoS thread — runs at the lowest application priority.
  *
@@ -140,6 +260,7 @@ static int enable_conn_event_reporting(void)
  * 2. If yes, reset interval to FAST; if no, double toward BASE
  * 3. Run chmap_filter_process() to evaluate channel quality
  * 4. If the filter recommends a channel map change, apply it
+ * 5. If host map merge is enabled, also check for host map changes
  */
 static void qos_thread_fn(void *p1, void *p2, void *p3)
 {
@@ -179,16 +300,30 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
 		update_channel_map = chmap_filter_process(chmap_inst);
 		atomic_set(&processing, false);
 
+		uint8_t *chmap = chmap_filter_suggested_map_get(chmap_inst);
+		uint8_t final_map[5];
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+		if (update_channel_map) {
+			merge_host_map(chmap, final_map);
+		} else if (host_map_changed(chmap, final_map)) {
+			update_channel_map = true;
+		}
+#else
+		memcpy(final_map, chmap, 5);
+#endif
+
 		if (!update_channel_map) {
 			continue;
 		}
 
-		uint8_t *chmap = chmap_filter_suggested_map_get(chmap_inst);
-
-		err = bt_le_set_chan_map(chmap);
+		err = bt_le_set_chan_map(final_map);
 		if (err) {
 			LOG_WRN("bt_le_set_chan_map failed: %d", err);
 		} else {
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+			memcpy(last_applied_map, final_map, 5);
+#endif
 			LOG_INF("BLE channel map updated (interval=%u ms)",
 				current_interval_ms);
 		}
@@ -204,18 +339,44 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
  */
 static void connected_cb(struct bt_conn *conn, uint8_t err)
 {
-	if (err || reporting_enabled) {
+	if (err) {
 		return;
 	}
 
-	int ret = enable_conn_event_reporting();
-	if (!ret) {
-		reporting_enabled = true;
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+	struct bt_conn_info info;
+
+	if (!bt_conn_get_info(conn, &info) &&
+	    info.role == BT_CONN_ROLE_PERIPHERAL && !host_conn) {
+		host_conn = bt_conn_ref(conn);
+		LOG_INF("QoS: host connection tracked for channel map merge");
+	}
+#endif
+
+	if (!reporting_enabled) {
+		int ret = enable_conn_event_reporting();
+		if (!ret) {
+			reporting_enabled = true;
+		}
 	}
 }
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
+{
+	if (conn == host_conn) {
+		LOG_INF("QoS: host connection lost, disabling channel map merge");
+		bt_conn_unref(host_conn);
+		host_conn = NULL;
+	}
+}
+#endif
+
 BT_CONN_CB_DEFINE(qos_conn_cb) = {
 	.connected = connected_cb,
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+	.disconnected = disconnected_cb,
+#endif
 };
 
 /*

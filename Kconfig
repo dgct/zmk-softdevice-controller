@@ -245,6 +245,30 @@ config ZMK_BLE_QOS_STACK_SIZE
 	help
 	  Stack size for the QoS processing thread.
 
+config ZMK_BLE_QOS_HOST_MAP_MERGE
+	bool "Merge host-link channel map into split-link QoS"
+	default y
+	help
+	  Read the host connection's channel map (controlled by macOS/Windows/
+	  Linux) and AND it with the chmap_filter output before applying to
+	  the split link. This lets the split link benefit from the host's
+	  independent AFH observations without waiting to discover the same
+	  interference via CRC errors.
+
+	  Requires a host (peripheral-role) connection to be active. When no
+	  host is connected the QoS filter operates standalone.
+
+config ZMK_BLE_QOS_HOST_MAP_MIN_CHANNELS
+	int "Minimum channels after host map merge"
+	default 15
+	depends on ZMK_BLE_QOS_HOST_MAP_MERGE
+	range 2 37
+	help
+	  If ANDing the QoS filter output with the host channel map would
+	  leave fewer than this many channels, skip the merge and use the
+	  QoS-only map. Prevents over-restriction when both maps are
+	  independently conservative.
+
 module = ZMK_BLE_QOS
 module-str = zmk_ble_qos
 source "subsys/logging/Kconfig.template.log_config"

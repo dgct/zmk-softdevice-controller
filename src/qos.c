@@ -384,6 +384,24 @@ BT_CONN_CB_DEFINE(qos_conn_cb) = {
  * Initializes the chmap_filter library and starts the QoS thread.
  * VS event callback registration also happens here (before any connection).
  */
+static int apply_filter_params(void)
+{
+	struct chmap_filter_params params;
+
+	chmap_filter_params_get(chmap_inst, &params);
+	params.min_channel_count = CONFIG_ZMK_BLE_QOS_MIN_CHANNEL_COUNT;
+	params.eval_keepout_duration = CONFIG_ZMK_BLE_QOS_EVAL_KEEPOUT_DURATION;
+
+	int err = chmap_filter_params_set(chmap_inst, &params);
+	if (err) {
+		LOG_ERR("chmap_filter_params_set failed: %d", err);
+	} else {
+		LOG_INF("QoS filter params: min_ch=%u keepout=%u",
+			params.min_channel_count, params.eval_keepout_duration);
+	}
+	return err;
+}
+
 static int qos_init(void)
 {
 	int err;
@@ -396,6 +414,8 @@ static int qos_init(void)
 		LOG_ERR("chmap_filter_instance_init failed: %d", err);
 		return err;
 	}
+
+	apply_filter_params();
 
 	err = bt_hci_register_vnd_evt_cb(on_vs_evt);
 	if (err) {
@@ -420,6 +440,12 @@ SYS_INIT(qos_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
  * Activity state listener — triggers a QoS burst on wake from sleep.
  * Idle→active transitions (frequent with 1s idle timeout) are ignored.
  * Sleep→active means the RF environment may have changed significantly.
+ *
+ * With ZMK_BLE_QOS_REINIT_ON_WAKE enabled, the chmap_filter instance is
+ * fully re-initialized on sleep→active. This clears all stale channel
+ * ratings and blocked-channel history built up before sleep. The CRC
+ * update callback is gated by the `processing` atomic during re-init
+ * to avoid feeding data into a half-initialized instance.
  */
 static int qos_activity_listener(const zmk_event_t *eh)
 {
@@ -432,7 +458,34 @@ static int qos_activity_listener(const zmk_event_t *eh)
 	last_activity_state = ev->state;
 
 	if (ev->state == ZMK_ACTIVITY_ACTIVE && prev == ZMK_ACTIVITY_SLEEP) {
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_REINIT_ON_WAKE)
+		LOG_INF("QoS: wake from sleep, re-initializing filter");
+		/*
+		 * Gate CRC updates during re-init. The `processing` flag is
+		 * checked by on_vs_evt() and causes it to skip
+		 * chmap_filter_crc_update(), preventing races with the
+		 * instance being reset underneath.
+		 */
+		atomic_set(&processing, true);
+
+		int err = chmap_filter_instance_init(chmap_inst,
+						     sizeof(chmap_inst_buf));
+		if (err) {
+			LOG_ERR("chmap_filter re-init failed: %d", err);
+		} else {
+			apply_filter_params();
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+			/* Force host_map_changed() to detect a difference on
+			 * the first post-wake iteration so the all-channels
+			 * map from the fresh filter is applied immediately. */
+			memset(last_applied_map, 0, sizeof(last_applied_map));
+#endif
+		}
+
+		atomic_set(&processing, false);
+#else
 		LOG_INF("QoS: wake from sleep, requesting burst");
+#endif
 		atomic_set(&burst_requested, true);
 	}
 

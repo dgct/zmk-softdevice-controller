@@ -269,6 +269,46 @@ config ZMK_BLE_QOS_HOST_MAP_MIN_CHANNELS
 	  QoS-only map. Prevents over-restriction when both maps are
 	  independently conservative.
 
+config ZMK_BLE_QOS_MIN_CHANNEL_COUNT
+	int "Minimum channels the chmap_filter will keep"
+	default 15
+	range 2 37
+	help
+	  Minimum number of BLE data channels that chmap_filter will keep in
+	  the channel map. The library default (4) allows near-starvation under
+	  WiFi coexistence. 15 maintains Channel Selection Algorithm #2 spacing
+	  >= 3, providing adequate frequency diversity to tolerate residual
+	  interference from colocated BLE devices and USB 3.0 noise.
+
+config ZMK_BLE_QOS_EVAL_KEEPOUT_DURATION
+	int "Blocked-channel keepout duration (filter process cycles)"
+	default 2000
+	range 100 10000
+	help
+	  Number of chmap_filter_process() cycles a blocked channel must wait
+	  before being re-evaluated. At the 1s baseline interval this is
+	  ~2000 seconds. WiFi APs sit on a fixed channel for hours/days, so
+	  probing blocked WiFi channels every 5 minutes (300 cycles at 1s) is
+	  wasteful and causes periodic packet loss spikes.
+
+	  2000 cycles (~33 min at 1s baseline) matches WiFi persistence.
+	  dynamic_durations scales this based on channel history — channels
+	  that were blocked before get longer keepout automatically.
+
+config ZMK_BLE_QOS_REINIT_ON_WAKE
+	bool "Re-initialize channel map filter on wake from sleep"
+	default y
+	help
+	  When the keyboard wakes from ZMK_ACTIVITY_SLEEP (after hours of
+	  deep sleep), the RF environment has likely changed significantly:
+	  the user may have moved to a different room, WiFi APs may have
+	  changed channels, or new interference sources may be present.
+
+	  Re-initializing the chmap_filter clears stale channel ratings and
+	  blocked-channel history, giving the filter a fresh start with all
+	  37 channels enabled. The tuned parameters (min_channel_count,
+	  eval_keepout_duration) are re-applied after re-init.
+
 module = ZMK_BLE_QOS
 module-str = zmk_ble_qos
 source "subsys/logging/Kconfig.template.log_config"

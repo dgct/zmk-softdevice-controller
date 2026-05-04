@@ -187,11 +187,16 @@ config ZMK_BLE_LLPM_SWITCH_DELAY_MS
 
 config ZMK_BLE_LLPM_SUPERVISION_TIMEOUT
 	int "LLPM supervision timeout (×10ms)"
-	default 400
+	default 600
 	range 100 3200
 	help
 	  Supervision timeout for the LLPM connection in 10ms units.
-	  400 = 4 seconds. Range: 1-32 seconds.
+	  600 = 6 seconds. Range: 1-32 seconds.
+
+	  With 2ms CI and subrating (idle factor=15, dormant factor=80),
+	  a 4s timeout gives only ~25 missed dormant events before
+	  disconnect. 6s survives longer Wi-Fi interference bursts
+	  without triggering unnecessary split reconnections.
 
 module = ZMK_BLE_LLPM
 module-str = zmk_ble_llpm
@@ -332,15 +337,18 @@ if ZMK_BLE_QOS_CHANNEL_SURVEY
 
 config ZMK_BLE_QOS_SURVEY_INTERVAL_US
 	int "Survey measurement target interval (microseconds)"
-	default 5000000
-	range 100000 30000000
+	default 4000000
+	range 3000 4000000
 	help
 	  Target average interval between channel survey measurements.
 	  The SDC will attempt to schedule measurements at this rate, but
 	  due to fourth scheduling priority, actual intervals may be longer.
 
-	  5000000 (5 seconds) is a reasonable starting point. Under dual
-	  7.5ms connection interval load, reports may arrive less frequently.
+	  Valid range: 3,000 - 4,000,000 us (SDK constraint). Use 0 to
+	  schedule at every available opportunity. 4,000,000 (4 seconds)
+	  is the most power-efficient rate that stays within SDK limits.
+	  Under dual 7.5ms connection interval load, reports may arrive
+	  less frequently.
 
 config ZMK_BLE_QOS_SURVEY_ENERGY_THRESHOLD
 	int "Energy threshold for blocking (dBm)"
@@ -375,3 +383,164 @@ module-str = zmk_ble_qos
 source "subsys/logging/Kconfig.template.log_config"
 
 endif # ZMK_BLE_QOS
+
+# ============================================================================
+# LE Power Control Autonomous Mode
+# ============================================================================
+
+config ZMK_BLE_POWER_CONTROL_AUTO
+	bool "Enable autonomous LE Power Control Request"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	depends on BT_TRANSMIT_POWER_CONTROL
+	help
+	  Configure the SoftDevice Controller to autonomously send
+	  LL_POWER_CONTROL_REQ when the average RSSI of a connection drifts
+	  outside the configured golden range. Also enables responding to
+	  power adjustment requests from the peer (APR handling).
+
+	  This requires CONFIG_BT_TRANSMIT_POWER_CONTROL=y and
+	  CONFIG_BT_CTLR_LE_POWER_CONTROL=y in the controller.
+
+	  The VS HCI command sdc_hci_cmd_vs_set_power_control_request_params
+	  is sent once after the first BLE connection is established.
+
+if ZMK_BLE_POWER_CONTROL_AUTO
+
+config ZMK_BLE_POWER_CONTROL_RSSI_LOWER_LIMIT
+	int "RSSI lower limit of golden range (dBm)"
+	default -70
+	range -100 -20
+	help
+	  When average RSSI drops below this threshold, the controller
+	  autonomously requests the peer to increase TX power.
+	  -70 dBm is appropriate for keyboard-to-host at 1-3m range.
+
+config ZMK_BLE_POWER_CONTROL_RSSI_UPPER_LIMIT
+	int "RSSI upper limit of golden range (dBm)"
+	default -30
+	range -80 0
+	help
+	  When average RSSI rises above this threshold, the controller
+	  autonomously requests the peer to decrease TX power.
+	  -30 dBm is appropriate for very close range (split link).
+
+config ZMK_BLE_POWER_CONTROL_RSSI_LOWER_TARGET
+	int "Target RSSI when below lower limit (dBm)"
+	default -65
+	range -90 -20
+	help
+	  The controller requests peer TX power adjustment to reach this
+	  RSSI when the average is below the lower limit.
+
+config ZMK_BLE_POWER_CONTROL_RSSI_UPPER_TARGET
+	int "Target RSSI when above upper limit (dBm)"
+	default -35
+	range -70 0
+	help
+	  The controller requests peer TX power adjustment to reach this
+	  RSSI when the average is above the upper limit.
+
+config ZMK_BLE_POWER_CONTROL_WAIT_PERIOD_MS
+	int "Minimum interval between autonomous requests (ms)"
+	default 5000
+	range 1000 30000
+	help
+	  Minimum time in milliseconds between consecutive autonomous
+	  LL_POWER_CONTROL_REQ procedures. Prevents rapid-fire requests
+	  when RSSI is oscillating near a threshold.
+
+config ZMK_BLE_POWER_CONTROL_BETA
+	int "RSSI averaging weight (0-4095)"
+	default 2048
+	range 0 4095
+	help
+	  Exponential weighted moving average weight for RSSI calculation.
+	  Higher values weight history more heavily (slower response).
+	  avg[n] = (beta/4096) * avg[n-1] + (1 - beta/4096) * rssi[n]
+	  2048 = gamma of 0.5, a balanced compromise between responsiveness
+	  and stability.
+
+config ZMK_BLE_POWER_CONTROL_APR_MARGIN
+	int "APR margin (dB)"
+	default 5
+	range 0 20
+	help
+	  When the peer requests us to reduce TX power (via APR in
+	  LL_POWER_CONTROL_RSP), the actual reduction applied is
+	  (received_apr - apr_margin). This hysteresis prevents
+	  ping-pong power oscillations. Default 5 dB.
+
+endif # ZMK_BLE_POWER_CONTROL_AUTO
+
+# ============================================================================
+# LE Path Loss Monitoring
+# ============================================================================
+
+config ZMK_BLE_PATH_LOSS_MONITORING
+	bool "Enable LE Path Loss Monitoring on host link"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	depends on BT_PATH_LOSS_MONITORING
+	depends on BT_PERIPHERAL
+	help
+	  Configure and enable LE Path Loss Monitoring on each host-link
+	  connection (peripheral role). The controller reports zone transitions
+	  when the estimated path loss crosses configured thresholds.
+
+	  Path loss = peer_tx_power - local_rssi. Higher values indicate the
+	  device is farther from the host or experiencing RF attenuation.
+
+	  Requires the host (macOS/Windows/Linux) to support LE Power Control
+	  (BLE 5.2+). If the peer doesn't support it, the controller reports
+	  ZONE_UNAVAILABLE and the feature is silently inactive.
+
+if ZMK_BLE_PATH_LOSS_MONITORING
+
+config ZMK_BLE_PATH_LOSS_HIGH_THRESHOLD
+	int "High path loss threshold (dB)"
+	default 70
+	range 20 255
+	help
+	  Path loss above this value triggers the HIGH zone event.
+	  For a keyboard at 1-3m from a laptop, 70 dB indicates the signal
+	  is getting weak (borderline for reliable BLE communication).
+	  At this point the controller should consider boosting TX power.
+
+config ZMK_BLE_PATH_LOSS_HIGH_HYSTERESIS
+	int "High threshold hysteresis (dB)"
+	default 6
+	range 0 20
+	help
+	  Path loss must drop this many dB below the high threshold
+	  before transitioning back to the MIDDLE zone. Prevents rapid
+	  zone toggling when path loss oscillates near the threshold.
+
+config ZMK_BLE_PATH_LOSS_LOW_THRESHOLD
+	int "Low path loss threshold (dB)"
+	default 40
+	range 10 200
+	help
+	  Path loss below this value triggers the LOW zone event.
+	  For a keyboard, 40 dB indicates very close range (< 0.5m)
+	  where the split halves typically sit. TX power can be reduced.
+
+config ZMK_BLE_PATH_LOSS_LOW_HYSTERESIS
+	int "Low threshold hysteresis (dB)"
+	default 6
+	range 0 20
+	help
+	  Path loss must rise this many dB above the low threshold
+	  before transitioning to the MIDDLE zone.
+
+config ZMK_BLE_PATH_LOSS_MIN_TIME_SPENT
+	int "Minimum time in new zone before reporting (conn events)"
+	default 100
+	range 1 65535
+	help
+	  Number of connection events the path loss must remain in the
+	  new zone before the controller generates a threshold report.
+	  Debounces transient signal fluctuations.
+
+	  With 11.25ms host CI: 100 events = ~1.1 seconds.
+	  With 7.5ms host CI: 100 events = ~0.75 seconds.
+
+endif # ZMK_BLE_PATH_LOSS_MONITORING

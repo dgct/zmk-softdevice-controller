@@ -63,6 +63,14 @@ static uint16_t survey_keepout[37];
 static bool survey_enabled;
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_POWER_CONTROL_AUTO)
+static bool power_control_configured;
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
+static struct bt_conn *path_loss_conn;
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 static struct bt_conn *host_conn;
 static uint8_t last_applied_map[5];
@@ -150,6 +158,60 @@ static int enable_conn_event_reporting(void)
 
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_POWER_CONTROL_AUTO)
+/*
+ * Configure autonomous LE Power Control Request parameters via VS HCI.
+ * The SDC stores these globally and applies them to all connections.
+ * When auto_enable=1, the controller autonomously sends
+ * LL_POWER_CONTROL_REQ when average RSSI drifts outside the golden range.
+ * When apr_enable=1, the controller adjusts local TX power in response
+ * to APR values received from the peer.
+ *
+ * Must be called after BT is ready (i.e. from a connection callback).
+ */
+static int configure_power_control(void)
+{
+	struct net_buf *buf;
+	int err;
+
+	buf = bt_hci_cmd_create(
+		SDC_HCI_OPCODE_CMD_VS_SET_POWER_CONTROL_REQUEST_PARAMS,
+		sizeof(sdc_hci_cmd_vs_set_power_control_request_params_t));
+	if (!buf) {
+		LOG_ERR("Failed to allocate HCI buf for power control params");
+		return -ENOMEM;
+	}
+
+	sdc_hci_cmd_vs_set_power_control_request_params_t *cmd = net_buf_add(
+		buf, sizeof(sdc_hci_cmd_vs_set_power_control_request_params_t));
+
+	cmd->auto_enable = 1;
+	cmd->apr_enable = 1;
+	cmd->beta = CONFIG_ZMK_BLE_POWER_CONTROL_BETA;
+	cmd->lower_limit = CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_LOWER_LIMIT;
+	cmd->upper_limit = CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_UPPER_LIMIT;
+	cmd->lower_target_rssi = CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_LOWER_TARGET;
+	cmd->upper_target_rssi = CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_UPPER_TARGET;
+	cmd->wait_period_ms = CONFIG_ZMK_BLE_POWER_CONTROL_WAIT_PERIOD_MS;
+	cmd->apr_margin = CONFIG_ZMK_BLE_POWER_CONTROL_APR_MARGIN;
+
+	err = bt_hci_cmd_send_sync(
+		SDC_HCI_OPCODE_CMD_VS_SET_POWER_CONTROL_REQUEST_PARAMS,
+		buf, NULL);
+	if (err) {
+		LOG_ERR("Failed to set power control params: %d", err);
+	} else {
+		LOG_INF("LE Power Control autonomous mode enabled "
+			"(RSSI range [%d, %d] dBm, wait %u ms)",
+			CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_LOWER_LIMIT,
+			CONFIG_ZMK_BLE_POWER_CONTROL_RSSI_UPPER_LIMIT,
+			CONFIG_ZMK_BLE_POWER_CONTROL_WAIT_PERIOD_MS);
+	}
+
+	return err;
+}
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
 /*
@@ -516,15 +578,55 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
+    IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 	struct bt_conn_info info;
 
 	if (!bt_conn_get_info(conn, &info) &&
-	    info.role == BT_CONN_ROLE_PERIPHERAL && !host_conn) {
-		host_conn = bt_conn_ref(conn);
-		LOG_INF("QoS: host connection tracked for channel map merge");
-	}
+	    info.role == BT_CONN_ROLE_PERIPHERAL) {
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+		if (!host_conn) {
+			host_conn = bt_conn_ref(conn);
+			LOG_INF("QoS: host connection tracked for channel map merge");
+		}
 #endif
+#if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
+		if (!path_loss_conn) {
+			static const struct bt_conn_le_path_loss_reporting_param
+				plm_params = {
+				.high_threshold =
+					CONFIG_ZMK_BLE_PATH_LOSS_HIGH_THRESHOLD,
+				.high_hysteresis =
+					CONFIG_ZMK_BLE_PATH_LOSS_HIGH_HYSTERESIS,
+				.low_threshold =
+					CONFIG_ZMK_BLE_PATH_LOSS_LOW_THRESHOLD,
+				.low_hysteresis =
+					CONFIG_ZMK_BLE_PATH_LOSS_LOW_HYSTERESIS,
+				.min_time_spent =
+					CONFIG_ZMK_BLE_PATH_LOSS_MIN_TIME_SPENT,
+			};
+			int ret = bt_conn_le_set_path_loss_mon_param(conn,
+								     &plm_params);
+			if (ret) {
+				LOG_WRN("Path loss params failed: %d", ret);
+			} else {
+				ret = bt_conn_le_set_path_loss_mon_enable(conn,
+									  true);
+				if (ret) {
+					LOG_WRN("Path loss enable failed: %d",
+						 ret);
+				} else {
+					path_loss_conn = bt_conn_ref(conn);
+					LOG_INF("Path loss monitoring enabled "
+						"(high=%u low=%u dB)",
+						CONFIG_ZMK_BLE_PATH_LOSS_HIGH_THRESHOLD,
+						CONFIG_ZMK_BLE_PATH_LOSS_LOW_THRESHOLD);
+				}
+			}
+		}
+#endif /* ZMK_BLE_PATH_LOSS_MONITORING */
+	}
+#endif /* HOST_MAP_MERGE || PATH_LOSS_MONITORING */
 
 	if (!reporting_enabled) {
 		int ret = enable_conn_event_reporting();
@@ -541,23 +643,72 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		}
 	}
 #endif
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_POWER_CONTROL_AUTO)
+	if (!power_control_configured) {
+		int ret = configure_power_control();
+		if (!ret) {
+			power_control_configured = true;
+		}
+	}
+#endif
 }
 
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
+    IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 	if (conn == host_conn) {
 		LOG_INF("QoS: host connection lost, disabling channel map merge");
 		bt_conn_unref(host_conn);
 		host_conn = NULL;
+	}
+#endif
+#if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
+	if (conn == path_loss_conn) {
+		LOG_INF("Path loss monitoring: host disconnected");
+		bt_conn_unref(path_loss_conn);
+		path_loss_conn = NULL;
+	}
+#endif
+}
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
+static void path_loss_threshold_cb(struct bt_conn *conn,
+	const struct bt_conn_le_path_loss_threshold_report *report)
+{
+	static const char *zone_names[] = {
+		[BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_LOW] = "LOW",
+		[BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_MIDDLE] = "MIDDLE",
+		[BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_HIGH] = "HIGH",
+		[BT_CONN_LE_PATH_LOSS_ZONE_UNAVAILABLE] = "UNAVAILABLE",
+	};
+
+	const char *zone = (report->zone <= BT_CONN_LE_PATH_LOSS_ZONE_UNAVAILABLE)
+		? zone_names[report->zone] : "UNKNOWN";
+
+	if (report->zone == BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_HIGH) {
+		LOG_WRN("Path loss HIGH zone: %u dB — host link degraded",
+			report->path_loss);
+	} else if (report->zone == BT_CONN_LE_PATH_LOSS_ZONE_UNAVAILABLE) {
+		LOG_WRN("Path loss UNAVAILABLE — peer may not support "
+			"LE Power Control");
+	} else {
+		LOG_INF("Path loss zone: %s (%u dB)", zone, report->path_loss);
 	}
 }
 #endif
 
 BT_CONN_CB_DEFINE(qos_conn_cb) = {
 	.connected = connected_cb,
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
+    IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 	.disconnected = disconnected_cb,
+#endif
+#if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
+	.path_loss_threshold_report = path_loss_threshold_cb,
 #endif
 };
 

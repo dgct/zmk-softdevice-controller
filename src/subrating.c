@@ -14,6 +14,9 @@ LOG_MODULE_REGISTER(zmk_sdc_subrating, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/event_manager.h>
 #include <zmk/events/activity_state_changed.h>
+#if IS_ENABLED(CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY)
+#include <zmk/events/ble_host_param_request.h>
+#endif
 
 #if IS_ENABLED(CONFIG_BT_SUBRATING)
 
@@ -117,6 +120,8 @@ BUILD_ASSERT(HOST_DORMANT_TIMEOUT * 10 >
              (HOST_DORMANT_INT_MAX * 125 / 100) * (HOST_DORMANT_LATENCY + 1) * 3,
     "Timeout must be > interval_max * (latency + 1) * 3");
 
+#if !IS_ENABLED(CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY)
+/* Without ble_latency, apply host params directly */
 static const struct bt_le_conn_param host_dormant_params = {
     .interval_min = HOST_DORMANT_INT_MIN,
     .interval_max = HOST_DORMANT_INT_MAX,
@@ -124,7 +129,6 @@ static const struct bt_le_conn_param host_dormant_params = {
     .timeout = HOST_DORMANT_TIMEOUT,
 };
 
-/* Normal host parameters (from ZMK defaults) */
 static const struct bt_le_conn_param host_active_params = {
     .interval_min = CONFIG_BT_PERIPHERAL_PREF_MIN_INT,
     .interval_max = CONFIG_BT_PERIPHERAL_PREF_MAX_INT,
@@ -140,7 +144,6 @@ static void apply_conn_param_to_host(struct bt_conn *conn, void *data) {
         return;
     }
 
-    /* Host connections are where we act as peripheral */
     if (info.role == BT_CONN_ROLE_PERIPHERAL && info.state == BT_CONN_STATE_CONNECTED) {
         int err = bt_conn_le_param_update(conn, params);
         if (err && err != -EALREADY) {
@@ -148,6 +151,7 @@ static void apply_conn_param_to_host(struct bt_conn *conn, void *data) {
         }
     }
 }
+#endif /* !CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY */
 
 #endif /* CONFIG_ZMK_BLE_HOST_CONN_PARAM_DORMANT */
 
@@ -229,19 +233,29 @@ static void set_tier(enum subrate_tier tier) {
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_HOST_CONN_PARAM_DORMANT)
-    /* Update host connection parameters when entering/exiting dormant */
+    /* When ble_latency is active, route host param changes through its
+     * single-writer interface.  Otherwise apply directly. */
     if (tier == TIER_DORMANT) {
         LOG_INF("Host conn params: dormant (interval=%d-%d, latency=%d)",
                 HOST_DORMANT_INT_MIN, HOST_DORMANT_INT_MAX, HOST_DORMANT_LATENCY);
+#if IS_ENABLED(CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY)
+        raise_zmk_ble_host_param_request((struct zmk_ble_host_param_request){
+            .interval_min = HOST_DORMANT_INT_MIN,
+            .interval_max = HOST_DORMANT_INT_MAX,
+            .latency = HOST_DORMANT_LATENCY,
+            .timeout = HOST_DORMANT_TIMEOUT,
+            .restore = false,
+        });
+#else
         bt_conn_foreach(BT_CONN_TYPE_LE, apply_conn_param_to_host,
                         (void *)&host_dormant_params);
+#endif
     } else if (prev_tier == TIER_DORMANT) {
 #if IS_ENABLED(CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY)
-        /* ble_latency.c manages host CI recovery on ACTIVE — it detects
-         * the wide dormant CI and requests FAST_CI directly.  Sending
-         * host_active_params here would race (same HCI slot) and force
-         * ble_latency.c through unnecessary retry cycles. */
-        LOG_INF("Host conn params: deferring restore to ble_latency");
+        LOG_INF("Host conn params: requesting restore from ble_latency");
+        raise_zmk_ble_host_param_request((struct zmk_ble_host_param_request){
+            .restore = true,
+        });
 #else
         LOG_INF("Host conn params: active (interval=%d-%d, latency=%d)",
                 CONFIG_BT_PERIPHERAL_PREF_MIN_INT, CONFIG_BT_PERIPHERAL_PREF_MAX_INT,

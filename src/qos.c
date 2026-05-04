@@ -802,6 +802,7 @@ static int qos_activity_listener(const zmk_event_t *eh)
 		LOG_INF("QoS: wake from sleep, requesting burst");
 #endif
 		atomic_set(&burst_requested, true);
+		k_wakeup(&qos_thread);
 	}
 
 	return 0;

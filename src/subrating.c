@@ -156,7 +156,7 @@ static K_WORK_DELAYABLE_DEFINE(dormant_work, dormant_timer_handler);
 
 static void tier_retry_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tier_retry_work, tier_retry_handler);
-#define TIER_RETRY_DELAY_MS 200
+#define TIER_RETRY_DELAY_MS 50
 
 enum subrate_tier { TIER_ACTIVE, TIER_IDLE, TIER_DORMANT };
 static enum subrate_tier current_tier = TIER_IDLE;

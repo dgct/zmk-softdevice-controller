@@ -154,8 +154,14 @@ static void apply_conn_param_to_host(struct bt_conn *conn, void *data) {
 static void dormant_timer_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(dormant_work, dormant_timer_handler);
 
+static void tier_retry_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(tier_retry_work, tier_retry_handler);
+#define TIER_RETRY_DELAY_MS 200
+
 enum subrate_tier { TIER_ACTIVE, TIER_IDLE, TIER_DORMANT };
 static enum subrate_tier current_tier = TIER_IDLE;
+static bool tier_confirmed = true;
+static bool subrate_request_failed;
 
 static void apply_subrate_to_conn(struct bt_conn *conn, void *data) {
     const struct bt_conn_le_subrate_param *params = data;
@@ -167,19 +173,21 @@ static void apply_subrate_to_conn(struct bt_conn *conn, void *data) {
 
     if (info.role == BT_CONN_ROLE_CENTRAL && info.state == BT_CONN_STATE_CONNECTED) {
         int err = bt_conn_le_subrate_request(conn, params);
-        if (err && err != -EALREADY) {
+        if (err) {
             LOG_WRN("Failed to request subrate: %d", err);
+            subrate_request_failed = true;
         }
     }
 }
 
 static void set_tier(enum subrate_tier tier) {
-    if (tier == current_tier) {
+    if (tier == current_tier && tier_confirmed) {
         return;
     }
 
     enum subrate_tier prev_tier = current_tier;
     current_tier = tier;
+    tier_confirmed = false;
 
     const struct bt_conn_le_subrate_param *params;
     const char *tier_name;
@@ -206,7 +214,19 @@ static void set_tier(enum subrate_tier tier) {
             params->max_latency, params->continuation_number);
 
     bt_conn_le_subrate_set_defaults(params);
+
+    subrate_request_failed = false;
     bt_conn_foreach(BT_CONN_TYPE_LE, apply_subrate_to_conn, (void *)params);
+
+    if (subrate_request_failed) {
+        LOG_WRN("Subrate request failed synchronously, allowing retry");
+        current_tier = prev_tier;
+        /* tier_confirmed stays false so next same-tier attempt retries */
+    }
+
+    if (!tier_confirmed) {
+        k_work_schedule(&tier_retry_work, K_MSEC(TIER_RETRY_DELAY_MS));
+    }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_HOST_CONN_PARAM_DORMANT)
     /* Update host connection parameters when entering/exiting dormant */
@@ -216,17 +236,33 @@ static void set_tier(enum subrate_tier tier) {
         bt_conn_foreach(BT_CONN_TYPE_LE, apply_conn_param_to_host,
                         (void *)&host_dormant_params);
     } else if (prev_tier == TIER_DORMANT) {
+#if IS_ENABLED(CONFIG_ZMK_BLE_DYNAMIC_HID_LATENCY)
+        /* ble_latency.c manages host CI recovery on ACTIVE — it detects
+         * the wide dormant CI and requests FAST_CI directly.  Sending
+         * host_active_params here would race (same HCI slot) and force
+         * ble_latency.c through unnecessary retry cycles. */
+        LOG_INF("Host conn params: deferring restore to ble_latency");
+#else
         LOG_INF("Host conn params: active (interval=%d-%d, latency=%d)",
                 CONFIG_BT_PERIPHERAL_PREF_MIN_INT, CONFIG_BT_PERIPHERAL_PREF_MAX_INT,
                 CONFIG_BT_PERIPHERAL_PREF_LATENCY);
         bt_conn_foreach(BT_CONN_TYPE_LE, apply_conn_param_to_host,
                         (void *)&host_active_params);
+#endif
     }
 #endif
 }
 
 static void dormant_timer_handler(struct k_work *work) {
     set_tier(TIER_DORMANT);
+}
+
+static void tier_retry_handler(struct k_work *work) {
+    if (!tier_confirmed) {
+        LOG_INF("Retrying unconfirmed subrate tier change");
+        tier_confirmed = true; /* let set_tier proceed without short-circuit */
+        set_tier(current_tier);
+    }
 }
 
 static void subrate_active(void) {
@@ -301,6 +337,7 @@ static const struct bt_conn_le_subrate_param peripheral_active_params = {
 };
 
 static bool peripheral_is_active = false;
+static bool peripheral_active_confirmed = false;
 
 static void apply_subrate_to_peripheral_conn(struct bt_conn *conn, void *data) {
     const struct bt_conn_le_subrate_param *params = data;
@@ -312,8 +349,9 @@ static void apply_subrate_to_peripheral_conn(struct bt_conn *conn, void *data) {
 
     if (info.role == BT_CONN_ROLE_PERIPHERAL && info.state == BT_CONN_STATE_CONNECTED) {
         int err = bt_conn_le_subrate_request(conn, params);
-        if (err && err != -EALREADY) {
+        if (err) {
             LOG_WRN("Peripheral failed to request subrate: %d", err);
+            peripheral_is_active = false;
         }
     }
 }
@@ -325,14 +363,16 @@ static int peripheral_subrating_activity_listener(const zmk_event_t *eh) {
     }
 
     if (ev->state == ZMK_ACTIVITY_ACTIVE) {
-        if (!peripheral_is_active) {
+        if (!peripheral_is_active || !peripheral_active_confirmed) {
             LOG_INF("Peripheral requesting ACTIVE subrate");
             bt_conn_foreach(BT_CONN_TYPE_LE, apply_subrate_to_peripheral_conn,
                             (void *)&peripheral_active_params);
             peripheral_is_active = true;
+            peripheral_active_confirmed = false;
         }
     } else {
         peripheral_is_active = false;
+        peripheral_active_confirmed = false;
     }
 
     return 0;
@@ -350,6 +390,7 @@ static void peripheral_disconnected_cb(struct bt_conn *conn, uint8_t reason)
     }
     if (info.role == BT_CONN_ROLE_PERIPHERAL) {
         peripheral_is_active = false;
+        peripheral_active_confirmed = false;
     }
 }
 
@@ -377,6 +418,17 @@ static void subrate_changed_cb(struct bt_conn *conn,
     if (params->status == BT_HCI_ERR_SUCCESS) {
         LOG_INF("Subrating [%s %s]: factor=%d, cn=%d",
                 role, addr_str, params->factor, params->continuation_number);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+        if (info.role == BT_CONN_ROLE_CENTRAL) {
+            tier_confirmed = true;
+            k_work_cancel_delayable(&tier_retry_work);
+        }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+        if (info.role == BT_CONN_ROLE_PERIPHERAL) {
+            peripheral_active_confirmed = true;
+        }
+#endif
     } else {
         LOG_WRN("Subrating failed [%s %s]: 0x%02x", role, addr_str, params->status);
     }

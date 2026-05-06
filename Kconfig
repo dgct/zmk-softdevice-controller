@@ -350,33 +350,75 @@ config ZMK_BLE_QOS_SURVEY_INTERVAL_US
 	  Under dual 7.5ms connection interval load, reports may arrive
 	  less frequently.
 
-config ZMK_BLE_QOS_SURVEY_ENERGY_THRESHOLD
-	int "Energy threshold for blocking (dBm)"
-	default -70
-	range -100 -30
-	help
-	  Channels with measured energy above this threshold (in dBm) are
-	  blocked by the survey layer. The threshold should be set above the
-	  noise floor (~-90 dBm) but below typical WiFi signal levels.
-
-	  -70 dBm is a conservative starting point. WiFi at 2-3 meters is
-	  typically -50 to -65 dBm. Tune empirically using the debug log
-	  output of raw survey energy values.
-
-config ZMK_BLE_QOS_SURVEY_KEEPOUT_CYCLES
-	int "Survey block keepout duration (processing cycles)"
-	default 60
-	range 10 300
-	help
-	  Number of QoS processing cycles a survey-blocked channel must wait
-	  before being re-evaluated. At the 1-second baseline interval this
-	  is approximately 60 seconds.
-
-	  Short keepout allows false positives to self-correct quickly while
-	  true positives are independently promoted to long-term blocks
-	  (~2000 cycles) by the CRC-based chmap_filter.
-
 endif # ZMK_BLE_QOS_CHANNEL_SURVEY
+
+# Priority-score algorithm tuning
+# Weights are Q8 fixed point: 256 = 1.0
+
+config ZMK_BLE_QOS_SCORE_W_ENERGY
+	int "Energy score weight (Q8)"
+	default 256
+	range 0 2048
+	help
+	  Weight applied to energy-above-noise-floor in the priority score.
+	  256 = 1.0x.  Energy is proactive (detects interference before CRC
+	  errors appear) but less definitive than confirmed packet loss.
+
+config ZMK_BLE_QOS_SCORE_W_CRC
+	int "CRC error score weight (Q8)"
+	default 1024
+	range 0 4096
+	help
+	  Weight applied to CRC error ratio in the priority score.
+	  1024 = 4.0x.  CRC errors are definitive proof of packet loss.
+	  This should be the highest weight to ensure channels with confirmed
+	  errors are deprioritized decisively.
+
+config ZMK_BLE_QOS_SCORE_W_HOST
+	int "Host/dongle map penalty weight (Q8)"
+	default 384
+	range 0 2048
+	help
+	  Flat penalty added to channels blocked by the host/dongle's AFH.
+	  384 = 1.5x.  This is a soft signal — the host/dongle has different
+	  antenna position and may see different interference.  Not a veto.
+	  For dongle mode: captures USB3 noise the keyboard may not detect.
+	  For OS mode: captures WiFi coexistence data from macOS/Windows.
+
+config ZMK_BLE_QOS_SCORE_W_FILTER
+	int "chmap_filter penalty weight (Q8)"
+	default 512
+	range 0 2048
+	help
+	  Flat penalty added to channels blocked by Nordic's chmap_filter.
+	  512 = 2.0x.  The filter detects WiFi-shaped interference patterns
+	  (contiguous BLE channel blocks matching 802.11 channel widths).
+	  Stronger than host penalty because it uses CRC-confirmed data with
+	  WiFi pattern awareness.
+
+config ZMK_BLE_QOS_SCORE_NOISE_FLOOR
+	int "Energy noise floor (dBm)"
+	default -90
+	range -110 -60
+	help
+	  Energy readings below this value contribute zero to the score.
+	  Set to the observed noise floor of the RF environment.  Typical
+	  values: -90 dBm (quiet office), -85 dBm (busy apartment).
+	  Only energy ABOVE this floor contributes to channel badness.
+
+config ZMK_BLE_QOS_SCORE_BLOCK_THRESHOLD
+	int "Score threshold for channel exclusion"
+	default 512
+	range 128 4096
+	help
+	  Channels with composite priority score above this threshold are
+	  excluded from the channel map, provided at least MIN_CHANNEL_COUNT
+	  channels remain included.
+
+	  Lower values = more aggressive exclusion (fewer channels used).
+	  Higher values = more permissive (keep channels with moderate scores).
+	  512 is a reasonable starting point: requires multiple weak signals
+	  or one strong CRC-confirmed bad channel to trigger exclusion.
 
 module = ZMK_BLE_QOS
 module-str = zmk_ble_qos

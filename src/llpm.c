@@ -180,8 +180,13 @@ static int send_conn_rate_request(struct bt_conn *conn, uint32_t interval_us,
 	cmd->conn_handle = conn_handle;
 	cmd->conn_interval_min = ci_val;
 	cmd->conn_interval_max = ci_val;
+#if IS_ENABLED(CONFIG_BT_SUBRATING)
+	cmd->subrate_min = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MIN;
+	cmd->subrate_max = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MAX;
+#else
 	cmd->subrate_min = 1;
 	cmd->subrate_max = 1;
+#endif
 	cmd->max_latency = latency;
 	cmd->continuation_number = 0;
 	cmd->supervision_timeout = timeout;
@@ -361,8 +366,13 @@ static void set_default_rate_params(void)
 		net_buf_add(buf, sizeof(*cmd));
 	cmd->conn_interval_min = ci_val;
 	cmd->conn_interval_max = ci_val;
+#if IS_ENABLED(CONFIG_BT_SUBRATING)
+	cmd->subrate_min = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MIN;
+	cmd->subrate_max = CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MAX;
+#else
 	cmd->subrate_min = 1;
 	cmd->subrate_max = 1;
+#endif
 	cmd->max_latency = 0;
 	cmd->continuation_number = 0;
 	cmd->supervision_timeout = CONFIG_ZMK_BLE_LLPM_SUPERVISION_TIMEOUT;

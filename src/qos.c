@@ -78,9 +78,17 @@ static uint8_t last_applied_map[5];
 
 /* Central-role connection handles for CRC event filtering.
  * Only split-link (central-role) CRC data should feed into chmap_filter.
- * Host-link (peripheral-role) CRC errors would pollute channel ratings. */
-static uint16_t central_handles[CONFIG_BT_MAX_CONN];
-static uint8_t central_handle_count;
+ * Host-link (peripheral-role) CRC errors would pollute channel ratings.
+ *
+ * Design: sentinel-based (no count variable). Each slot is either a valid
+ * handle or HANDLE_UNUSED. Writers (connected/disconnected on sysworkq)
+ * and readers (on_vs_evt on BT RX thread) operate on individual atomic slots.
+ * Worst-case race: reader misses a just-added handle (drops one CRC sample)
+ * or matches a just-removed handle (feeds one extra sample). Both harmless. */
+#define HANDLE_UNUSED (-1)
+static atomic_t central_handles[CONFIG_BT_MAX_CONN] = {
+	[0 ... CONFIG_BT_MAX_CONN - 1] = ATOMIC_INIT(HANDLE_UNUSED)
+};
 
 static int apply_filter_params(void);
 
@@ -117,8 +125,9 @@ static bool on_vs_evt(struct net_buf_simple *buf)
 		 * ratings. */
 		{
 			bool is_central = false;
-			for (uint8_t i = 0; i < central_handle_count; i++) {
-				if (central_handles[i] == evt->conn_handle) {
+			for (uint8_t i = 0; i < ARRAY_SIZE(central_handles); i++) {
+				if (atomic_get(&central_handles[i]) ==
+				    (atomic_val_t)evt->conn_handle) {
 					is_central = true;
 					break;
 				}
@@ -606,12 +615,16 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		if (!bt_conn_get_info(conn, &info) &&
 		    info.role == BT_CONN_ROLE_CENTRAL) {
 			uint16_t handle;
-			if (!bt_hci_get_conn_handle(conn, &handle) &&
-			    central_handle_count < ARRAY_SIZE(central_handles)) {
-				central_handles[central_handle_count++] = handle;
-				LOG_INF("QoS: tracking central handle 0x%04x "
-					"(%u total)", handle,
-					central_handle_count);
+			if (!bt_hci_get_conn_handle(conn, &handle)) {
+				for (uint8_t i = 0; i < ARRAY_SIZE(central_handles); i++) {
+					if (atomic_cas(&central_handles[i],
+						       HANDLE_UNUSED,
+						       (atomic_val_t)handle)) {
+						LOG_INF("QoS: tracking central handle "
+							"0x%04x (slot %u)", handle, i);
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -698,13 +711,12 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	{
 		uint16_t handle;
 		if (!bt_hci_get_conn_handle(conn, &handle)) {
-			for (uint8_t i = 0; i < central_handle_count; i++) {
-				if (central_handles[i] == handle) {
-					central_handles[i] =
-						central_handles[--central_handle_count];
+			for (uint8_t i = 0; i < ARRAY_SIZE(central_handles); i++) {
+				if (atomic_cas(&central_handles[i],
+					       (atomic_val_t)handle,
+					       HANDLE_UNUSED)) {
 					LOG_INF("QoS: removed central handle "
-						"0x%04x (%u remaining)",
-						handle, central_handle_count);
+						"0x%04x (slot %u)", handle, i);
 					break;
 				}
 			}

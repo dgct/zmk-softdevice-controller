@@ -76,6 +76,12 @@ static struct bt_conn *host_conn;
 static uint8_t last_applied_map[5];
 #endif
 
+/* Central-role connection handles for CRC event filtering.
+ * Only split-link (central-role) CRC data should feed into chmap_filter.
+ * Host-link (peripheral-role) CRC errors would pollute channel ratings. */
+static uint16_t central_handles[CONFIG_BT_MAX_CONN];
+static uint8_t central_handle_count;
+
 static int apply_filter_params(void);
 
 /*
@@ -105,6 +111,22 @@ static bool on_vs_evt(struct net_buf_simple *buf)
 			return true;
 		}
 		evt = (void *)buf->data;
+		/* Only feed central-role (split-link) CRC data into
+		 * chmap_filter. Skip peripheral-role (host-link) events
+		 * to prevent host interference from polluting channel
+		 * ratings. */
+		{
+			bool is_central = false;
+			for (uint8_t i = 0; i < central_handle_count; i++) {
+				if (central_handles[i] == evt->conn_handle) {
+					is_central = true;
+					break;
+				}
+			}
+			if (!is_central) {
+				return true;
+			}
+		}
 		chmap_filter_crc_update(chmap_inst,
 			evt->channel_index,
 			evt->crc_ok_count,
@@ -578,6 +600,22 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
+	/* Track central-role connection handles for CRC event filtering */
+	{
+		struct bt_conn_info info;
+		if (!bt_conn_get_info(conn, &info) &&
+		    info.role == BT_CONN_ROLE_CENTRAL) {
+			uint16_t handle;
+			if (!bt_hci_get_conn_handle(conn, &handle) &&
+			    central_handle_count < ARRAY_SIZE(central_handles)) {
+				central_handles[central_handle_count++] = handle;
+				LOG_INF("QoS: tracking central handle 0x%04x "
+					"(%u total)", handle,
+					central_handle_count);
+			}
+		}
+	}
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
     IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 	struct bt_conn_info info;
@@ -654,10 +692,25 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 #endif
 }
 
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
-    IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
+	/* Remove central-role handle from tracking array */
+	{
+		uint16_t handle;
+		if (!bt_hci_get_conn_handle(conn, &handle)) {
+			for (uint8_t i = 0; i < central_handle_count; i++) {
+				if (central_handles[i] == handle) {
+					central_handles[i] =
+						central_handles[--central_handle_count];
+					LOG_INF("QoS: removed central handle "
+						"0x%04x (%u remaining)",
+						handle, central_handle_count);
+					break;
+				}
+			}
+		}
+	}
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE)
 	if (conn == host_conn) {
 		LOG_INF("QoS: host connection lost, disabling channel map merge");
@@ -673,7 +726,6 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	}
 #endif
 }
-#endif
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 static void path_loss_threshold_cb(struct bt_conn *conn,
@@ -703,10 +755,7 @@ static void path_loss_threshold_cb(struct bt_conn *conn,
 
 BT_CONN_CB_DEFINE(qos_conn_cb) = {
 	.connected = connected_cb,
-#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_HOST_MAP_MERGE) || \
-    IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 	.disconnected = disconnected_cb,
-#endif
 #if IS_ENABLED(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
 	.path_loss_threshold_report = path_loss_threshold_cb,
 #endif

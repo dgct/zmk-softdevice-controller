@@ -499,7 +499,7 @@ static void build_scored_map(const uint8_t *filter_map,
 
         /* Insertion sort ascending (best = lowest score first) */
         for (int i = 1; i < 37; i++) {
-                typeof(ranked[0]) tmp = ranked[i];
+                __typeof__(ranked[0]) tmp = ranked[i];
                 int j = i - 1;
                 while (j >= 0 && ranked[j].score > tmp.score) {
                         ranked[j + 1] = ranked[j];

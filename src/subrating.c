@@ -301,8 +301,11 @@ static int subrating_activity_listener(const zmk_event_t *eh) {
         subrate_active();
         break;
     case ZMK_ACTIVITY_IDLE:
-    case ZMK_ACTIVITY_SLEEP:
         subrate_idle();
+        break;
+    case ZMK_ACTIVITY_SLEEP:
+        k_work_cancel_delayable(&dormant_work);
+        set_tier(TIER_DORMANT);
         break;
     default:
         LOG_WRN("Unhandled activity state: %d", ev->state);

@@ -160,7 +160,17 @@ static K_WORK_DELAYABLE_DEFINE(dormant_work, dormant_timer_handler);
 
 static void tier_retry_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tier_retry_work, tier_retry_handler);
-#define TIER_RETRY_DELAY_MS 50
+
+/*
+ * Retry delay must exceed one full subrated interval under the PREVIOUS
+ * tier's factor, otherwise the retry fires before the peer can respond.
+ * Worst case CI on the split link is ~11.25ms (9 units).  Formula:
+ *   delay = prev_factor_max × CI_max_ms + margin
+ * We use 12ms as CI_max (covers 7.5ms and 11.25ms with headroom).
+ */
+#define TIER_RETRY_CI_HEADROOM_MS 12
+#define TIER_RETRY_MARGIN_MS      20
+static uint16_t last_confirmed_factor = 1;
 
 enum subrate_tier { TIER_ACTIVE, TIER_IDLE, TIER_DORMANT };
 static enum subrate_tier current_tier = TIER_IDLE;
@@ -229,7 +239,9 @@ static void set_tier(enum subrate_tier tier) {
     }
 
     if (!tier_confirmed) {
-        k_work_schedule(&tier_retry_work, K_MSEC(TIER_RETRY_DELAY_MS));
+        uint16_t retry_ms = last_confirmed_factor * TIER_RETRY_CI_HEADROOM_MS
+                            + TIER_RETRY_MARGIN_MS;
+        k_work_schedule(&tier_retry_work, K_MSEC(retry_ms));
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_HOST_CONN_PARAM_DORMANT)
@@ -437,6 +449,7 @@ static void subrate_changed_cb(struct bt_conn *conn,
                 role, addr_str, params->factor, params->continuation_number);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
         if (info.role == BT_CONN_ROLE_CENTRAL) {
+            last_confirmed_factor = params->factor;
             tier_confirmed = true;
             k_work_cancel_delayable(&tier_retry_work);
         }

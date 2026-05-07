@@ -7,8 +7,8 @@ if(CONFIG_ZMK_BT_LL_SOFTDEVICE AND CONFIG_BT_SUBRATING)
   zephyr_include_directories(${APPLICATION_SOURCE_DIR}/include)
 endif()
 
-if(CONFIG_ZMK_BLE_LLPM)
-  zephyr_library_sources(src/llpm.c)
+if(CONFIG_ZMK_BLE_SCI)
+  zephyr_library_sources(src/sci.c)
 endif()
 
 if(CONFIG_ZMK_BLE_QOS)

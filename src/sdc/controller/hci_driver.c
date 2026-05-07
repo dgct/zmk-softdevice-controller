@@ -24,7 +24,8 @@
 #include <sdc_soc.h>
 #include <sdc_hci.h>
 #include <sdc_hci_vs.h>
-#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE)
+#if defined(CONFIG_BT_CTLR_SDC_CONNECTION_RATE_UPDATE) || \
+    defined(CONFIG_BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS)
 #include <sdc_hci_cmd_le.h>
 #endif
 #include <mpsl.h>
@@ -1403,6 +1404,27 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 	}
 #endif
 #endif /* CONFIG_BT_CONN */
+
+#if defined(CONFIG_BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS)
+	/* ZMK's Zephyr fork lacks the host-side BT_SHORTER_CONNECTION_INTERVALS
+	 * Kconfig that NCS's Zephyr uses to send LE_Set_Host_Feature.  Without
+	 * the host setting bit 73 (Shorter Connection Intervals Host Support),
+	 * the SDC won't advertise SCI in LL features and remote centrals will
+	 * get HCI 0x1a "Unsupported Remote Feature" when they try SCI.
+	 *
+	 * Call the SDC HCI command directly to set the host feature bit.
+	 */
+	{
+		sdc_hci_cmd_le_set_host_feature_t sci_host_feat = {
+			.bit_number = 73, /* Shorter Connection Intervals (Host Support) */
+			.bit_value = 1,
+		};
+		err = sdc_hci_cmd_le_set_host_feature(&sci_host_feat);
+		if (err) {
+			LOG_WRN("LE_Set_Host_Feature(SCI) failed: %d", err);
+		}
+	}
+#endif
 
 #if defined(CONFIG_BT_CENTRAL)
 	sdc_hci_cmd_vs_central_acl_event_spacing_set_t acl_event_spacing_params = {

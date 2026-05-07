@@ -866,6 +866,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 static void path_loss_threshold_cb(struct bt_conn *conn,
         const struct bt_conn_le_path_loss_threshold_report *report)
 {
+#if CONFIG_ZMK_BLE_QOS_LOG_LEVEL > 0
         static const char *zone_names[] = {
                 [BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_LOW] = "LOW",
                 [BT_CONN_LE_PATH_LOSS_ZONE_ENTERED_MIDDLE] = "MIDDLE",
@@ -885,6 +886,10 @@ static void path_loss_threshold_cb(struct bt_conn *conn,
         } else {
                 LOG_INF("Path loss zone: %s (%u dB)", zone, report->path_loss);
         }
+#else
+        ARG_UNUSED(conn);
+        ARG_UNUSED(report);
+#endif
 }
 #endif
 

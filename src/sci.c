@@ -476,8 +476,11 @@ static void set_default_rate_params(void)
 
 /*
  * Query and log the minimum supported connection interval and
- * supported interval groups from the SDC.  One-time diagnostic.
+ * supported interval groups from the SDC.  Pure diagnostic — the HCI
+ * query, response parsing, and loop exist solely to feed LOG calls.
+ * Compiled out entirely when the SCI log level is 0 (CONFIG_LOG=n).
  */
+#if CONFIG_ZMK_BLE_SCI_LOG_LEVEL > 0
 static void log_min_supported_conn_interval(void)
 {
 	struct net_buf *buf, *rsp = NULL;
@@ -522,6 +525,9 @@ static void log_min_supported_conn_interval(void)
 
 	net_buf_unref(rsp);
 }
+#else
+static inline void log_min_supported_conn_interval(void) {}
+#endif
 
 /*
  * Set flush timeout on a host-link (peripheral role) connection.

@@ -192,6 +192,32 @@ config ZMK_BLE_SCI_SWITCH_DELAY_MS
 	  starting the SCI switch (Frame Space Update + Connection
 	  Rate Request). Allows pairing/encryption to complete first.
 
+config ZMK_BLE_SCI_RETRIGGER_DELAY_MS
+	int "Delay before re-triggering SCI after reconnection (ms)"
+	default 50
+	range 10 200
+	help
+	  Milliseconds to wait before re-triggering SCI after the split
+	  peripheral reconnects with active parameters (CI <= 10ms,
+	  latency=0). Shorter than the initial delay since the link is
+	  already established. Only applies to reconnection scenarios
+	  where SCI was previously active.
+
+config ZMK_BLE_SCI_FLUSH_TIMEOUT_MIN_SLOTS
+	int "Minimum flush timeout (baseband slots, 0.625ms each)"
+	default 8
+	range 0 255
+	help
+	  Minimum flush timeout for Flushable ACL Data. The actual
+	  timeout scales with the connection interval to allow ~3
+	  connection events for delivery:
+	    flush_slots = max(this, CI_slots * 3)
+
+	  8 slots = 5ms (good floor for sub-7.5ms CI).
+	  Set to 0 to disable flush timeout entirely.
+
+	  Requires CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA=y.
+
 config ZMK_BLE_SCI_SUPERVISION_TIMEOUT
 	int "SCI supervision timeout (×10ms)"
 	default 600

@@ -38,6 +38,8 @@
 #include <sdc_hci_cmd_le.h>
 #include <sdc_hci_cmd_controller_baseband.h>
 
+#include <zmk/sdc/sci.h>
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(zmk_ble_sci, CONFIG_ZMK_BLE_SCI_LOG_LEVEL);
 
@@ -50,6 +52,10 @@ LOG_MODULE_REGISTER(zmk_ble_sci, CONFIG_ZMK_BLE_SCI_LOG_LEVEL);
 /* Delay after PHY 2M before starting SCI procedures (ms) */
 #define SCI_SWITCH_DELAY_MS    CONFIG_ZMK_BLE_SCI_SWITCH_DELAY_MS
 
+/* Delay before re-triggering SCI after split reconnection (ms).
+ * Shorter than initial delay since the link is already established. */
+#define SCI_RETRIGGER_DELAY_MS  CONFIG_ZMK_BLE_SCI_RETRIGGER_DELAY_MS
+
 /*
  * Delay between frame space update and conn rate request (ms).
  * Gives the controller time to complete the LL frame space negotiation
@@ -57,9 +63,11 @@ LOG_MODULE_REGISTER(zmk_ble_sci, CONFIG_ZMK_BLE_SCI_LOG_LEVEL);
  */
 #define SCI_FSU_TO_CRR_DELAY_MS  200
 
-/* Flush timeout in baseband slots (0.625ms each).
- * 8 slots = 5ms — covers ~2 retransmit attempts at 2ms CI. */
-#define FLUSH_TIMEOUT_SLOTS    8
+/* Minimum flush timeout in baseband slots (0.625ms each).
+ * 8 slots = 5ms — covers ~2 retransmit attempts at 2ms CI.
+ * Actual timeout is scaled by CI: max(MIN_FLUSH_SLOTS, interval * 6)
+ * to allow ~3 connection events for delivery at any CI. */
+#define MIN_FLUSH_SLOTS        CONFIG_ZMK_BLE_SCI_FLUSH_TIMEOUT_MIN_SLOTS
 
 #define SCI_MAX_RETRIES        10
 
@@ -289,7 +297,12 @@ static void sci_switch_work_fn(struct k_work *work)
 		pending_conn = NULL;
 
 		if (IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
-			send_flush_timeout(conn, FLUSH_TIMEOUT_SLOTS);
+			/* Use SCI target CI to compute flush slots.
+			 * SCI_TARGET_US / 625 * 3 = ~3 connection events. */
+			uint16_t ci_slots = (uint16_t)(SCI_TARGET_US / 625);
+			uint16_t slots = MAX(MIN_FLUSH_SLOTS, ci_slots * 6);
+
+			send_flush_timeout(conn, slots);
 		}
 		return;
 
@@ -353,15 +366,25 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 }
 
 /*
- * Reject standard L2CAP conn param update requests while SCI is
- * active.  Without this, the keyboard's PPCP (CI=7.5ms) overrides
- * the SCI interval a few seconds after connection.
+ * Reject standard L2CAP conn param update requests on the split link
+ * while SCI is active.  Without this, the split peripheral's PPCP
+ * (CI=7.5ms) overrides the SCI interval a few seconds after connection.
+ *
+ * Only applies to central-role connections (split link).  Host link
+ * (peripheral role) param updates are always accepted — the host
+ * needs to adjust CI for its own power management.
  */
 static bool le_param_req_cb(struct bt_conn *conn,
 			    struct bt_le_conn_param *param)
 {
+	struct bt_conn_info info;
+
+	if (bt_conn_get_info(conn, &info) || info.role != BT_CONN_ROLE_CENTRAL) {
+		return true; /* always accept host link param updates */
+	}
+
 	if (sci_state == SCI_ACTIVE || sci_state == SCI_CONN_RATE_REQUESTED) {
-		LOG_INF("Rejecting conn param update (CI=%u-%u) — SCI active",
+		LOG_INF("Rejecting split conn param update (CI=%u-%u) — SCI active",
 			param->interval_min, param->interval_max);
 		return false;
 	}
@@ -396,7 +419,7 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval,
 		pending_conn = conn;
 		sci_retries = 0;
 		k_work_reschedule(&sci_switch_work,
-				  K_MSEC(SCI_SWITCH_DELAY_MS / 5));
+				  K_MSEC(SCI_RETRIGGER_DELAY_MS));
 	}
 }
 
@@ -498,6 +521,42 @@ static void log_min_supported_conn_interval(void)
 	}
 
 	net_buf_unref(rsp);
+}
+
+/*
+ * Set flush timeout on a host-link (peripheral role) connection.
+ * Scales timeout relative to the current connection interval so stale
+ * HID reports are discarded after ~3 connection events at any CI.
+ *
+ * Called from ble_latency when the host connection is secured or when
+ * the connection interval changes.  Safe to call multiple times.
+ */
+int sci_set_flush_timeout(struct bt_conn *conn)
+{
+	if (!IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
+		return 0;
+	}
+
+	if (MIN_FLUSH_SLOTS == 0) {
+		return 0; /* disabled by config */
+	}
+
+	struct bt_conn_info info;
+
+	if (bt_conn_get_info(conn, &info)) {
+		return -EINVAL;
+	}
+
+	/*
+	 * interval is in 1.25ms units.  Convert to baseband slots (0.625ms)
+	 * and allow ~3 connection events for delivery.
+	 *   ci_slots = interval * (1.25 / 0.625) = interval * 2
+	 *   flush = max(MIN_FLUSH_SLOTS, ci_slots * 3)
+	 */
+	uint16_t ci_slots = info.le.interval * 2;
+	uint16_t slots = MAX(MIN_FLUSH_SLOTS, ci_slots * 3);
+
+	return send_flush_timeout(conn, slots);
 }
 
 static int sci_init(void)

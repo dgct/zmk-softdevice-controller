@@ -9,6 +9,7 @@ endif()
 
 if(CONFIG_ZMK_BLE_SCI)
   zephyr_library_sources(src/sci.c)
+  zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 endif()
 
 if(CONFIG_ZMK_BLE_QOS)

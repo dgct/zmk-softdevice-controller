@@ -695,6 +695,8 @@ static void adapt_energy_weight(void)
                 scale = 1;
         }
 
+        int16_t prev = w_energy;
+
         if (true_pos > false_pos) {
                 w_energy += STEP_UP_BASE * scale;
                 if (w_energy > W_ENERGY_MAX) {
@@ -705,6 +707,12 @@ static void adapt_energy_weight(void)
                 if (w_energy < W_ENERGY_MIN) {
                         w_energy = W_ENERGY_MIN;
                 }
+        }
+
+        if (w_energy != prev) {
+                LOG_INF("LTE-U: w_e %d->%d (tp=%d fp=%d n=%d scale=%d)",
+                        prev, w_energy, true_pos, false_pos,
+                        n_classified, scale);
         }
 }
 #endif /* CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY */

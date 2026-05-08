@@ -46,7 +46,7 @@ LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 #define QOS_INTERVAL_FAST   CONFIG_ZMK_BLE_QOS_INTERVAL_FAST
 
 /* Score weights (Q8 fixed point: 256 = 1.0) */
-#define W_ENERGY         CONFIG_ZMK_BLE_QOS_SCORE_W_ENERGY
+#define W_ENERGY_DEFAULT CONFIG_ZMK_BLE_QOS_SCORE_W_ENERGY
 #define W_CRC            CONFIG_ZMK_BLE_QOS_SCORE_W_CRC
 #define W_HOST_PENALTY   CONFIG_ZMK_BLE_QOS_SCORE_W_HOST
 #define W_FILTER_PENALTY CONFIG_ZMK_BLE_QOS_SCORE_W_FILTER
@@ -63,6 +63,20 @@ LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 #define EWMA_CRC_SHIFT    3  /* alpha = 1/8, ~8-sample half-life */
 
 #define MIN_CHANNELS     CONFIG_ZMK_BLE_QOS_MIN_CHANNEL_COUNT
+
+/* Adaptive energy weight (LTE-U pattern): CRC confirms/denies energy
+ * predictions, tuning trust in the energy sensor at runtime.
+ * Wiener-optimal step size tied to adaptive interval. */
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+#define W_ENERGY_MIN             CONFIG_ZMK_BLE_QOS_SCORE_W_ENERGY_MIN
+#define W_ENERGY_MAX             CONFIG_ZMK_BLE_QOS_SCORE_W_ENERGY_MAX
+#define ENERGY_CORR_THRESHOLD_Q8 2560  /* 10 dB above noise floor */
+#define CRC_CORR_THRESHOLD_BASE  8     /* ~3% error rate in Q8 */
+#define ADAPT_HOLDOFF_CYCLES     16    /* 2x CRC EWMA half-life */
+#define STEP_UP_BASE             2     /* Wiener-optimal for persistent */
+#define STEP_DOWN_BASE           1     /* Neyman-Pearson 2:1 asymmetry */
+#define MIN_ADAPT_CHANNELS       5
+#endif
 
 static K_THREAD_STACK_DEFINE(qos_stack, CONFIG_ZMK_BLE_QOS_STACK_SIZE);
 static struct k_thread qos_thread;
@@ -120,6 +134,13 @@ static struct bt_conn *host_conn;
 #endif
 
 static uint8_t last_applied_map[5];
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+static int16_t w_energy = W_ENERGY_DEFAULT;
+static uint8_t adapt_holdoff;
+#else
+#define w_energy W_ENERGY_DEFAULT
+#endif
 
 /* Central-role connection handles for CRC event filtering.
  * Only split-link (central-role) CRC data should feed into chmap_filter
@@ -415,6 +436,10 @@ static void scores_reset(void)
                 ch_scores[ch].crc_ok_acc = 0;
                 ch_scores[ch].crc_err_acc = 0;
         }
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+        w_energy = W_ENERGY_DEFAULT;
+        adapt_holdoff = 0;
+#endif
 }
 
 /*
@@ -441,10 +466,11 @@ static int16_t compute_channel_score(int ch,
         struct channel_score *s = &ch_scores[ch];
 
         /* Energy component: energy above noise floor, weighted.
-         * Survey captures WiFi/microwave/USB3 interference proactively. */
+         * Survey captures WiFi/microwave/USB3 interference proactively.
+         * w_energy is adaptive when CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY. */
         int16_t energy_above = s->energy_ewma - NOISE_FLOOR_Q8;
         if (energy_above > 0) {
-                score += ((int32_t)energy_above * W_ENERGY) >> 8;
+                score += ((int32_t)energy_above * w_energy) >> 8;
         }
 
         /* CRC component: error ratio, weighted heavily.
@@ -592,6 +618,97 @@ static void scores_process_survey(void)
 }
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+/*
+ * Adapt the energy weight based on correlation between energy detection
+ * and CRC error rates on active channels.
+ *
+ * LTE-U pattern: reactive metrics (CRC) tune trust in proactive sensor
+ * (energy detection).  Wiener-optimal step size scales with the adaptive
+ * interval — transient interference triggers burst mode (100ms), which
+ * naturally yields 10x faster convergence via more cycles per second.
+ *
+ * Channel-count-normalized CRC threshold prevents the starvation feedback
+ * loop: at fewer active channels, collision probability rises even with
+ * constant interference, so the threshold for "CRC confirms energy" is
+ * raised proportionally.
+ */
+static void adapt_energy_weight(void)
+{
+        if (adapt_holdoff > 0) {
+                adapt_holdoff--;
+                return;
+        }
+
+        int n_active = 0;
+        int true_pos = 0;
+        int false_pos = 0;
+
+        /* Count active channels for CRC threshold normalization */
+        for (int ch = 0; ch < 37; ch++) {
+                if (last_applied_map[ch / 8] & (1U << (ch % 8))) {
+                        n_active++;
+                }
+        }
+
+        if (n_active < MIN_ADAPT_CHANNELS) {
+                return;
+        }
+
+        /* CRC threshold scaled by channel count: more channels = lower
+         * baseline collision rate = lower threshold for significance.
+         * CRC_CORR_THRESHOLD_BASE is calibrated for 37 channels. */
+        int16_t crc_thresh = (int16_t)(CRC_CORR_THRESHOLD_BASE * 37
+                                       / n_active);
+
+        int n_classified = 0;
+
+        for (int ch = 0; ch < 37; ch++) {
+                /* Only examine channels in the active map —
+                 * blocked channels have no CRC data, which would
+                 * bias toward false-negative detection. */
+                if (!(last_applied_map[ch / 8] & (1U << (ch % 8)))) {
+                        continue;
+                }
+
+                struct channel_score *s = &ch_scores[ch];
+                int16_t energy_above = s->energy_ewma - NOISE_FLOOR_Q8;
+                bool energy_high = (energy_above > ENERGY_CORR_THRESHOLD_Q8);
+                bool crc_high = (s->crc_ratio_ewma > crc_thresh);
+
+                if (energy_high && crc_high) {
+                        true_pos++;
+                } else if (energy_high && !crc_high) {
+                        false_pos++;
+                }
+                n_classified++;
+        }
+
+        if (n_classified < MIN_ADAPT_CHANNELS) {
+                return;
+        }
+
+        /* Step scales with interval: at burst (100ms), step is 10x
+         * baseline — Wiener-optimal for transient interference. */
+        int scale = QOS_INTERVAL_BASE / current_interval_ms;
+        if (scale < 1) {
+                scale = 1;
+        }
+
+        if (true_pos > false_pos) {
+                w_energy += STEP_UP_BASE * scale;
+                if (w_energy > W_ENERGY_MAX) {
+                        w_energy = W_ENERGY_MAX;
+                }
+        } else if (false_pos > true_pos) {
+                w_energy -= STEP_DOWN_BASE * scale;
+                if (w_energy < W_ENERGY_MIN) {
+                        w_energy = W_ENERGY_MIN;
+                }
+        }
+}
+#endif /* CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY */
+
 /*
  * QoS thread — runs at the lowest application priority.
  *
@@ -682,6 +799,11 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
                 }
 #endif
 
+                /* Step 4b: Adapt energy weight from CRC/energy correlation */
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+                adapt_energy_weight();
+#endif
+
                 /* Get chmap_filter's suggested map as penalty signal.
                  * Channels it blocked get W_FILTER_PENALTY added. */
                 uint8_t *filter_map =
@@ -713,9 +835,12 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
                         LOG_WRN("bt_le_set_chan_map failed: %d", err);
                 } else {
                         memcpy(last_applied_map, final_map, 5);
+#if IS_ENABLED(CONFIG_ZMK_BLE_QOS_ADAPTIVE_ENERGY)
+                        adapt_holdoff = ADAPT_HOLDOFF_CYCLES;
+#endif
                         LOG_INF("Channel map updated: %d ch "
-                                "(interval=%u ms)", count,
-                                current_interval_ms);
+                                "(interval=%u ms, w_e=%d)", count,
+                                current_interval_ms, w_energy);
                 }
 
                 chmap_filter_suggested_map_confirm(chmap_inst);

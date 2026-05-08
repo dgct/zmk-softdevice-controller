@@ -383,19 +383,53 @@ config ZMK_BLE_QOS_SURVEY_INTERVAL_US
 	  Under dual 7.5ms connection interval load, reports may arrive
 	  less frequently.
 
+config ZMK_BLE_QOS_ADAPTIVE_ENERGY
+	bool "Adaptive energy weight (LTE-U pattern)"
+	default y
+	depends on ZMK_BLE_QOS_CHANNEL_SURVEY
+	help
+	  Dynamically tune trust in the energy sensor based on correlation
+	  with CRC error rates.  When energy detection accurately predicts
+	  packet loss, its weight increases; when it produces false positives,
+	  its weight decreases.  Wiener-optimal step sizing tied to the
+	  adaptive interval for correct transient/persistent handling.
+	  Channel-count-normalized CRC thresholds prevent channel starvation.
+
+config ZMK_BLE_QOS_SCORE_W_ENERGY_MIN
+	int "Minimum adaptive energy weight (Q8)"
+	default 64
+	range 0 512
+	depends on ZMK_BLE_QOS_ADAPTIVE_ENERGY
+	help
+	  Floor for the adaptive energy weight.  64 = 0.25x.
+	  Even unreliable energy data has some information content.
+
+config ZMK_BLE_QOS_SCORE_W_ENERGY_MAX
+	int "Maximum adaptive energy weight (Q8)"
+	default 512
+	range 256 2048
+	depends on ZMK_BLE_QOS_ADAPTIVE_ENERGY
+	help
+	  Ceiling for the adaptive energy weight.  512 = 2.0x.
+	  At maximum, energy alone can reach the block threshold,
+	  enabling fully proactive channel blocking when calibrated.
+
 endif # ZMK_BLE_QOS_CHANNEL_SURVEY
 
 # Priority-score algorithm tuning
 # Weights are Q8 fixed point: 256 = 1.0
 
 config ZMK_BLE_QOS_SCORE_W_ENERGY
-	int "Energy score weight (Q8)"
+	int "Energy score weight / initial adaptive weight (Q8)"
 	default 256
 	range 0 2048
 	help
 	  Weight applied to energy-above-noise-floor in the priority score.
 	  256 = 1.0x.  Energy is proactive (detects interference before CRC
 	  errors appear) but less definitive than confirmed packet loss.
+	  When ZMK_BLE_QOS_ADAPTIVE_ENERGY is enabled, this is the initial
+	  value; the weight adapts at runtime between W_ENERGY_MIN and
+	  W_ENERGY_MAX based on CRC correlation.
 
 config ZMK_BLE_QOS_SCORE_W_CRC
 	int "CRC error score weight (Q8)"

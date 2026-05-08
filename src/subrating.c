@@ -233,14 +233,25 @@ static void set_tier(enum subrate_tier tier) {
     bt_conn_foreach(BT_CONN_TYPE_LE, apply_subrate_to_conn, (void *)params);
 
     if (subrate_request_failed) {
-        LOG_WRN("Subrate request failed synchronously, allowing retry");
-        current_tier = prev_tier;
-        /* tier_confirmed stays false so next same-tier attempt retries */
+        LOG_WRN("Subrate request failed synchronously, will retry");
+        /* Keep current_tier at the target so the retry attempts the
+         * intended tier, not the one we're stuck in. */
     }
 
     if (!tier_confirmed) {
-        uint16_t retry_ms = last_confirmed_factor * TIER_RETRY_CI_HEADROOM_MS
-                            + TIER_RETRY_MARGIN_MS;
+        /* When moving to a more aggressive (lower) factor, the 0x3a
+         * means the controller is busy with another LL procedure that
+         * will complete in a few connection events.  Use a short retry.
+         * When moving to a less aggressive (higher) factor, wait for
+         * one full subrated interval under the previous factor. */
+        uint16_t target_factor = params->subrate_max;
+        uint16_t retry_ms;
+        if (target_factor <= last_confirmed_factor) {
+            retry_ms = TIER_RETRY_MARGIN_MS;
+        } else {
+            retry_ms = last_confirmed_factor * TIER_RETRY_CI_HEADROOM_MS
+                       + TIER_RETRY_MARGIN_MS;
+        }
         k_work_schedule(&tier_retry_work, K_MSEC(retry_ms));
     }
 

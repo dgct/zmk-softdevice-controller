@@ -173,8 +173,9 @@ static int send_flush_timeout(struct bt_conn *conn, uint16_t flush_slots)
 	if (err) {
 		LOG_ERR("Write flush timeout failed: %d", err);
 	} else {
-		LOG_INF("Flush timeout set: %u slots (%.1f ms)",
-			flush_slots, flush_slots * 0.625f);
+		LOG_INF("Flush timeout set: %u slots (%u.%u ms)",
+			flush_slots, (flush_slots * 625) / 1000,
+			((flush_slots * 625) % 1000) / 100);
 	}
 
 	return err;

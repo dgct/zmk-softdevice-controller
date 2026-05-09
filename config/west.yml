@@ -8,7 +8,7 @@ manifest:
     # No board_root in its module.yml - safe to include
     - name: nrfxlib
       remote: nrfconnect
-      revision: v3.3.0
+      revision: 95888866851b42eb8a961facf4a670d65943da4d
       repo-path: sdk-nrfxlib
       path: nrfxlib
 

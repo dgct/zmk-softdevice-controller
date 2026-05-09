@@ -84,6 +84,21 @@ void nrfx_clock_enable(void)
 
 }
 
+/* nrfx v4.x split the clock API into per-domain sub-drivers.
+ * Zephyr's clock_control_nrf.c now calls nrfx_clock_lfclk_start/stop
+ * directly instead of nrfx_clock_start(NRF_CLOCK_DOMAIN_LFCLK).
+ */
+void nrfx_clock_lfclk_start(void)
+{
+        /* LFCLK is always running under MPSL — just report started. */
+        event_handler(NRFX_CLOCK_EVT_LFCLK_STARTED);
+}
+
+void nrfx_clock_lfclk_stop(void)
+{
+        /* LFCLK cannot be stopped under MPSL. */
+}
+
 int nrfx_clock_init(nrfx_clock_event_handler_t handler)
 {
 	event_handler = handler;

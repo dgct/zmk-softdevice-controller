@@ -84,7 +84,7 @@ config MPSL_TIMESLOT_SESSION_COUNT
 
 config MPSL_LOW_PRIO_IRQN
 	int "MPSL low priority IRQ number"
-	default 25 if SOC_SERIES_NRF52X
+	default 25 if SOC_SERIES_NRF52
 	help
 	  IRQ number for MPSL low-priority processing (SWI5 on nRF52).
 

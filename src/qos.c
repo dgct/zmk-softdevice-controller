@@ -39,6 +39,13 @@
 #include <zmk/events/activity_state_changed.h>
 
 #include <zephyr/logging/log.h>
+
+/* Zephyr v4.4 compat: bt_hci_cmd_create -> bt_hci_cmd_alloc */
+static inline struct net_buf *bt_hci_cmd_create(uint16_t opcode, uint8_t param_len) {
+	(void)opcode; (void)param_len;
+	return bt_hci_cmd_alloc(K_FOREVER);
+}
+
 LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 
 #define QOS_THREAD_PRIORITY K_PRIO_PREEMPT(K_LOWEST_APPLICATION_THREAD_PRIO)
@@ -63,6 +70,11 @@ LOG_MODULE_REGISTER(zmk_ble_qos, CONFIG_ZMK_BLE_QOS_LOG_LEVEL);
 #define EWMA_CRC_SHIFT    3  /* alpha = 1/8, ~8-sample half-life */
 
 #define MIN_CHANNELS     CONFIG_ZMK_BLE_QOS_MIN_CHANNEL_COUNT
+
+/* Map-diff hysteresis: only send LL_CHANNEL_MAP_IND when the new map
+ * differs from the current by at least this many channels.  Prevents
+ * churn under broadband interference where the "best N" set fluctuates. */
+#define MAP_DIFF_MIN  3
 
 /* Adaptive energy weight (LTE-U pattern): CRC confirms/denies energy
  * predictions, tuning trust in the energy sensor at runtime.
@@ -583,9 +595,12 @@ static void scores_process_crc(void)
                 /* Compute ratio in Q8: 0 = perfect, 256 = all errors */
                 int16_t ratio_q8 = ((int32_t)err_cnt << 8) / total;
 
-                /* EWMA update: alpha = 1/8 (~8 sample half-life) */
-                s->crc_ratio_ewma += (ratio_q8 - s->crc_ratio_ewma)
-                                     >> EWMA_CRC_SHIFT;
+                /* EWMA update: asymmetric — fast attack (alpha=1/2),
+                 * slow decay (alpha=1/8).  Blocks bad channels in ~100ms,
+                 * holds block for ~600ms after interference clears. */
+                int16_t diff = ratio_q8 - s->crc_ratio_ewma;
+                int shift = (diff > 0) ? 1 : EWMA_CRC_SHIFT;
+                s->crc_ratio_ewma += diff >> shift;
         }
 }
 
@@ -832,8 +847,18 @@ static void qos_thread_fn(void *p1, void *p2, void *p3)
                 build_scored_map(filter_map, host_map, host_map_valid,
                                  final_map);
 
-                /* Step 7: Apply if map changed from last applied */
-                if (memcmp(final_map, last_applied_map, 5) == 0) {
+                /* Step 7: Map-diff hysteresis — only update if the new
+                 * map differs by at least MAP_DIFF_MIN channels.
+                 * Prevents LL_CHANNEL_MAP_IND churn under broadband. */
+                int diff_count = 0;
+                for (int i = 0; i < 5; i++) {
+                        uint8_t xor = final_map[i] ^ last_applied_map[i];
+                        while (xor) {
+                                diff_count++;
+                                xor &= xor - 1;
+                        }
+                }
+                if (diff_count < MAP_DIFF_MIN) {
                         continue;
                 }
 

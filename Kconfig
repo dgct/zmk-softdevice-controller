@@ -192,6 +192,16 @@ config ZMK_BLE_SCI_SWITCH_DELAY_MS
 	  starting the SCI switch (Frame Space Update + Connection
 	  Rate Request). Allows pairing/encryption to complete first.
 
+config ZMK_BLE_SCI_PHY_SWITCH_DELAY_MS
+	int "Delay for PHY-triggered SCI switch (ms)"
+	default 2500
+	range 1000 10000
+	help
+	  Milliseconds to wait after PHY 2M before starting SCI on a new
+	  connection. Longer than SCI_SWITCH_DELAY_MS to give the peripheral
+	  trackpoint init time to complete PS/2 initialization at standard
+	  7.5ms CI before SCI drops CI to sub-7.5ms.
+
 config ZMK_BLE_SCI_RETRIGGER_DELAY_MS
 	int "Delay before re-triggering SCI after reconnection (ms)"
 	default 50

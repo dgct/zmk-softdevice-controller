@@ -1,4 +1,5 @@
 rsource "src/sdc/Kconfig"
+rsource "src/esb/Kconfig"
 
 # Three-tier subrating: ACTIVE (typing) -> IDLE (~30s) -> DORMANT (+5min)
 # Central controls tier transitions; peripheral requests ACTIVE on local activity

@@ -2,18 +2,7 @@ if(CONFIG_ZMK_BT_LL_SOFTDEVICE)
 
 zephyr_library()
 
-# Find nrfxlib - check module directory first, then workspace root
-get_filename_component(MODULE_ROOT ${CMAKE_CURRENT_LIST_DIR}/../.. ABSOLUTE)
-set(NRFXLIB_DIR ${MODULE_ROOT}/nrfxlib)
-
-if(NOT EXISTS ${NRFXLIB_DIR})
-  # Fall back to workspace root (ZEPHYR_BASE is <workspace>/zephyr)
-  get_filename_component(WORKSPACE_ROOT ${ZEPHYR_BASE}/.. ABSOLUTE)
-  if(EXISTS ${WORKSPACE_ROOT}/nrfxlib)
-    set(NRFXLIB_DIR ${WORKSPACE_ROOT}/nrfxlib)
-  endif()
-endif()
-
+# NRFXLIB_DIR is set by the parent CMakeLists.txt (zmk-softdevice-controller root).
 if(NOT EXISTS ${NRFXLIB_DIR})
   message(FATAL_ERROR "nrfxlib not found. Run 'west update' to fetch it.")
 endif()

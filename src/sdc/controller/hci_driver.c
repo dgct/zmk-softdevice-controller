@@ -963,6 +963,10 @@ static int configure_supported_features(void)
 	sdc_use_global_channel_map_on_connection();
 #endif
 
+	if (IS_ENABLED(CONFIG_BT_CTLR_PRIVACY)) {
+		sdc_support_le_privacy();
+	}
+
 	return 0;
 }
 

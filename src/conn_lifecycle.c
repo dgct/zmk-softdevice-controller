@@ -5,10 +5,10 @@
  * Unified connection-lifecycle state machine for ZMK split central.
  *
  * Consolidates SCI (Shorter Connection Intervals) and subrating into a
- * single callback-driven state machine.  CRR confirmation is optimistic
- * (ZMK's Zephyr lacks conn_rate_changed / frame_space_updated callbacks).
+ * single callback-driven state machine.  Every SCI transition is confirmed
+ * by le_param_updated_cb (since ZMK's Zephyr lacks conn_rate_changed).
  *
- * Manages two link types:
+ * Manages two independent instances:
  *   - Split link (central role): full SCI + subrating
  *   - Host link (peripheral role): subrating only (if supported)
  *
@@ -22,7 +22,11 @@
 #include <zephyr/bluetooth/buf.h>
 #include <zephyr/sys/byteorder.h>
 
-#include <zmk/sdc/hci_compat.h>
+/* Zephyr v4.4 compat: bt_hci_cmd_create -> bt_hci_cmd_alloc */
+static inline struct net_buf *bt_hci_cmd_create(uint16_t opcode, uint8_t param_len) {
+    (void)opcode; (void)param_len;
+    return bt_hci_cmd_alloc(K_FOREVER);
+}
 
 #include <sdc_hci_cmd_le.h>
 #include <sdc_hci_cmd_controller_baseband.h>
@@ -169,7 +173,6 @@ static bool has_pending_tier;
 /* Bounded retry counter for tier_retry_handler */
 #define TIER_MAX_RETRIES 5
 static uint8_t tier_retry_count;
-static uint16_t tier_retry_delay_ms;
 
 static void dormant_timer_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(dormant_work, dormant_timer_handler);
@@ -190,7 +193,7 @@ static bool lc_transition(struct lifecycle *lc, enum conn_state from,
     bool ok = (lc->state == from && lc->conn == conn);
     if (ok) {
         lc->state = to;
-        LOG_DBG("[split] -> %s", state_name(to));
+        LOG_INF("[split] -> %s", state_name(to));
     }
     k_spin_unlock(&lc->lock, key);
     return ok;
@@ -218,7 +221,7 @@ static int send_frame_space_update(struct bt_conn *conn) {
 
     err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_LE_FRAME_SPACE_UPDATE, buf);
     if (err) LOG_ERR("FSU failed: %d", err);
-    else LOG_DBG("FSU requested (min=0, max=150, 2M PHY)");
+    else LOG_INF("FSU requested (min=0, max=150, 2M PHY)");
     return err;
 }
 
@@ -252,9 +255,9 @@ static int send_conn_rate_request(struct bt_conn *conn, uint32_t interval_us,
     cmd->min_ce_length = 0;
     cmd->max_ce_length = 0;
 
-    err = bt_hci_cmd_send_sync(SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST, buf, NULL);
-    if (err) LOG_ERR("CRR HCI command failed: %d", err);
-    else LOG_DBG("CRR sent: CI=%u (0.125ms units, %u us)", ci_val, interval_us);
+    err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST, buf);
+    if (err) LOG_ERR("CRR failed: %d", err);
+    else LOG_INF("CRR sent: CI=%u (0.125ms units, %u us)", ci_val, interval_us);
     return err;
 }
 
@@ -275,7 +278,7 @@ static int send_flush_timeout(struct bt_conn *conn, uint16_t flush_slots) {
 
     err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_CB_WRITE_AUTOMATIC_FLUSH_TIMEOUT, buf);
     if (err) LOG_ERR("Flush timeout write failed: %d", err);
-    else LOG_DBG("Flush timeout: %u slots", flush_slots);
+    else LOG_INF("Flush timeout: %u slots", flush_slots);
     return err;
 }
 
@@ -320,11 +323,10 @@ static void do_crr(struct lifecycle *lc) {
         }
         return;
     }
-    /* ZMK's Zephyr lacks conn_rate_changed callback — CRR confirmation
-     * cannot be observed via le_param_updated_cb.  Transition optimistically
-     * after a short delay (LL procedure completes in <100ms). */
+    /* Advance to VERIFYING — le_param_updated_cb will confirm */
     lc_transition(lc, CS_CRR_PENDING, CS_CRR_VERIFYING, lc->conn);
-    k_work_schedule(&lc->step_work, K_MSEC(200));
+    /* Fallback: if param update never arrives, retry */
+    k_work_schedule(&lc->step_work, K_MSEC(2000));
 }
 
 /* Activate SCI after confirmed CI */
@@ -346,7 +348,6 @@ static void split_step_handler(struct k_work *work) {
     k_spinlock_key_t key = k_spin_lock(&split_lc.lock);
     enum conn_state state = split_lc.state;
     struct bt_conn *conn = split_lc.conn;
-    if (conn) bt_conn_ref(conn);
     k_spin_unlock(&split_lc.lock, key);
 
     if (!conn) return;
@@ -385,20 +386,27 @@ static void split_step_handler(struct k_work *work) {
         break;
 
     case CS_CRR_VERIFYING: {
-        /* ZMK's Zephyr lacks conn_rate_changed callback.
-         * After 200ms delay, optimistically assume CRR succeeded. */
-        LOG_DBG("SCI assumed active (optimistic, CI=%u us)", SCI_TARGET_US);
-        split_lc.achieved_ci_us = SCI_TARGET_US;
-        lc_transition(&split_lc, CS_CRR_VERIFYING, CS_SCI_ACTIVE, conn);
-        sci_activate(&split_lc);
+        /* le_param_updated never confirmed CRR — retry */
+        key = k_spin_lock(&split_lc.lock);
+        int retries = ++split_lc.retries;
+        k_spin_unlock(&split_lc.lock, key);
+
+        if (retries >= SCI_MAX_RETRIES) {
+            LOG_ERR("SCI confirmation timeout after %d retries", SCI_MAX_RETRIES);
+            lc_transition(&split_lc, CS_CRR_VERIFYING, CS_OPERATIONAL, conn);
+            split_lc.achieved_ci_us = 7500;
+            on_operational();
+        } else {
+            LOG_WRN("CRR verify timeout — retry %d/%d", retries, SCI_MAX_RETRIES);
+            lc_transition(&split_lc, CS_CRR_VERIFYING, CS_CRR_PENDING, conn);
+            do_crr(&split_lc);
+        }
         break;
     }
 
     default:
         break;
     }
-
-    bt_conn_unref(conn);
 }
 
 /* ──── TP ready signal (called from PS/2 driver) ──── */
@@ -410,7 +418,7 @@ void conn_lifecycle_tp_ready(void) {
     k_spin_unlock(&split_lc.lock, key);
 
     if (waiting) {
-        LOG_DBG("TP ready signal received — advancing to SCI");
+        LOG_INF("TP ready signal received — advancing to SCI");
         k_work_cancel_delayable(&split_lc.step_work);
         struct bt_conn *conn = split_lc.conn;
         if (split_lc.fsu_done) {
@@ -429,7 +437,7 @@ static void le_phy_updated_cb(struct bt_conn *conn,
                               struct bt_conn_le_phy_info *param) {
     char addr_str[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr_str, sizeof(addr_str));
-    LOG_DBG("PHY [%s]: tx=%u, rx=%u", addr_str, param->tx_phy, param->rx_phy);
+    LOG_INF("PHY [%s]: tx=%u, rx=%u", addr_str, param->tx_phy, param->rx_phy);
 
     if (param->tx_phy != BT_GAP_LE_PHY_2M) return;
 
@@ -445,17 +453,11 @@ static void le_phy_updated_cb(struct bt_conn *conn,
         return;
     }
 
-    /* Only handle the split link — ignore if already past PHY stage
-     * with this connection, or if a different connection is active. */
+    /* Only handle the split link */
     k_spinlock_key_t key = k_spin_lock(&split_lc.lock);
     bool idle = (split_lc.state == CS_IDLE || split_lc.state == CS_PHY_PENDING);
-    struct bt_conn *cur = split_lc.conn;
     k_spin_unlock(&split_lc.lock, key);
-    if (!idle && cur == conn) return;
-    if (cur && cur != conn) {
-        LOG_WRN("PHY 2M for unknown conn — ignoring (split already active)");
-        return;
-    }
+    if (!idle && split_lc.conn == conn) return;
 
     /* Take ref if first time */
     if (!split_lc.conn) {
@@ -463,25 +465,13 @@ static void le_phy_updated_cb(struct bt_conn *conn,
     }
     split_lc.retries = 0;
 
-    /* Cancel any stale subrating retry timer — it was scheduled before
-     * the SCI state machine started and would send bt_conn_le_subrate_request
-     * mid-PHY/FSU/CRR setup, colliding with LE_SET_PHY (error 0x3a). */
-    k_work_cancel_delayable(&tier_retry_work);
-    k_work_cancel_delayable(&dormant_work);
-    tier_retry_count = 0;
-
-    /* Mark PHY_PENDING so subsequent lc_transition calls have correct 'from' */
-    k_spinlock_key_t key2 = k_spin_lock(&split_lc.lock);
-    split_lc.state = CS_PHY_PENDING;
-    k_spin_unlock(&split_lc.lock, key2);
-
     /* PHY ready → enter TP_WAIT (or skip if tp already ready) */
     if (split_lc.tp_ready) {
-        LOG_DBG("PHY 2M + TP already ready — starting SCI");
+        LOG_INF("PHY 2M + TP already ready — starting SCI");
         lc_transition(&split_lc, CS_PHY_PENDING, CS_FSU_PENDING, conn);
         do_fsu(&split_lc);
     } else {
-        LOG_DBG("PHY 2M ready — waiting for TP init (%d ms timeout)",
+        LOG_INF("PHY 2M ready — waiting for TP init (%d ms timeout)",
                 SCI_PHY_SWITCH_DELAY_MS);
         lc_transition(&split_lc, CS_PHY_PENDING, CS_TP_WAIT, conn);
         /* Fallback timeout if TP_READY never arrives */
@@ -565,7 +555,7 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval,
     uint32_t ci_us = (uint32_t)interval * 1250;
     char addr_str[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr_str, sizeof(addr_str));
-    LOG_DBG("Params [%s]: CI=%u.%02ums, lat=%u, to=%u",
+    LOG_INF("Params [%s]: CI=%u.%02ums, lat=%u, to=%u",
             addr_str, (interval * 125) / 100, (interval * 125) % 100,
             latency, timeout);
 
@@ -575,91 +565,41 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval,
     enum conn_state state = split_lc.state;
     k_spin_unlock(&split_lc.lock, key);
 
-    /* Note: CRR (BLE 6.2) does NOT generate le_param_updated events.
-     * CRR confirmation is handled optimistically via timeout in
-     * split_step_handler (CS_CRR_VERIFYING case). */
+    /* CRR_VERIFYING: le_param_updated is our confirmation signal.
+     * If CI dropped to sub-7.5ms, CRR succeeded. */
+    if (state == CS_CRR_VERIFYING && ci_us <= 10000) {
+        k_work_cancel_delayable(&split_lc.step_work);
+        split_lc.achieved_ci_us = ci_us;
+        LOG_INF("SCI confirmed: CI=%u us", ci_us);
+        lc_transition(&split_lc, CS_CRR_VERIFYING, CS_SCI_ACTIVE, conn);
+        sci_activate(&split_lc);
+        return;
+    }
+
+    /* CRR_VERIFYING but CI didn't drop — CRR failed silently.
+     * Retry on the next step_work timeout (already scheduled). */
+    if (state == CS_CRR_VERIFYING && ci_us > 10000) {
+        LOG_WRN("CRR did not take effect (CI=%u us) — will retry", ci_us);
+        return;
+    }
 
     /* OPERATIONAL: keyboard parked us (CI went up) */
     if (state == CS_OPERATIONAL && ci_us > 10000 &&
         split_lc.achieved_ci_us < 7500) {
         split_lc.achieved_ci_us = ci_us;
-        LOG_DBG("SCI deactivated — parked at CI=%u us", ci_us);
+        LOG_INF("SCI deactivated — parked at CI=%u us", ci_us);
     }
 
     /* OPERATIONAL IDLE: keyboard woke us — re-establish SCI */
     if (state == CS_OPERATIONAL && ci_us <= 10000 && latency == 0 &&
         split_lc.achieved_ci_us >= 7500) {
-        LOG_DBG("Keyboard active — re-triggering SCI");
+        LOG_INF("Keyboard active — re-triggering SCI");
         split_lc.retries = 0;
         enum conn_state next = split_lc.fsu_done ? CS_CRR_PENDING : CS_FSU_PENDING;
         lc_transition(&split_lc, CS_OPERATIONAL, next, conn);
         k_work_schedule(&split_lc.step_work, K_MSEC(SCI_RETRIGGER_DELAY_MS));
     }
 }
-
-/* ──── BLE 6.2: Connection Rate Changed (CRR confirmation) ──── */
-#if IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
-static void conn_rate_changed_cb(struct bt_conn *conn, uint8_t status,
-                                 const struct bt_conn_le_conn_rate_changed *params) {
-    if (conn != split_lc.conn) return;
-
-    k_spinlock_key_t key = k_spin_lock(&split_lc.lock);
-    enum conn_state state = split_lc.state;
-    k_spin_unlock(&split_lc.lock, key);
-
-    if (status != BT_HCI_ERR_SUCCESS) {
-        LOG_WRN("CRR rejected: status=0x%02x", status);
-        if (state == CS_CRR_VERIFYING) {
-            /* Cancel the optimistic timeout and retry */
-            k_work_cancel_delayable(&split_lc.step_work);
-            lc_transition(&split_lc, CS_CRR_VERIFYING, CS_CRR_PENDING, conn);
-            do_crr(&split_lc);
-        }
-        return;
-    }
-
-    LOG_DBG("CRR confirmed: CI=%u us, factor=%u, lat=%u",
-            params->interval_us, params->subrate_factor,
-            params->peripheral_latency);
-
-    if (state == CS_CRR_VERIFYING) {
-        /* Real confirmation — cancel the optimistic timeout */
-        k_work_cancel_delayable(&split_lc.step_work);
-        split_lc.achieved_ci_us = params->interval_us;
-        lc_transition(&split_lc, CS_CRR_VERIFYING, CS_SCI_ACTIVE, conn);
-        sci_activate(&split_lc);
-    } else if (state == CS_OPERATIONAL) {
-        /* Rate change while operational (e.g., peer-initiated) */
-        split_lc.achieved_ci_us = params->interval_us;
-        if (params->interval_us > 10000) {
-            LOG_DBG("SCI deactivated — parked at CI=%u us", params->interval_us);
-        }
-    }
-}
-#endif /* CONFIG_BT_SHORTER_CONNECTION_INTERVALS */
-
-/* ──── BLE 6.0: Frame Space Update Complete ──── */
-#if IS_ENABLED(CONFIG_BT_FRAME_SPACE_UPDATE)
-static void frame_space_updated_cb(struct bt_conn *conn,
-                                   const struct bt_conn_le_frame_space_updated *params) {
-    if (conn != split_lc.conn) return;
-
-    LOG_DBG("FSU complete: frame_space=%u us, initiator=%u",
-            params->frame_space, params->initiator);
-
-    k_spinlock_key_t key = k_spin_lock(&split_lc.lock);
-    enum conn_state state = split_lc.state;
-    k_spin_unlock(&split_lc.lock, key);
-
-    if (state == CS_FSU_PENDING) {
-        /* Cancel the fixed-delay timeout and advance immediately */
-        k_work_cancel_delayable(&split_lc.step_work);
-        split_lc.fsu_done = true;
-        lc_transition(&split_lc, CS_FSU_PENDING, CS_CRR_PENDING, conn);
-        do_crr(&split_lc);
-    }
-}
-#endif /* CONFIG_BT_FRAME_SPACE_UPDATE */
 
 /* ──── Subrating (split central only) ──── */
 
@@ -692,12 +632,15 @@ static void apply_conn_param_to_host(struct bt_conn *conn, void *data) {
 #endif
 
 static void set_tier(enum subrate_tier tier) {
-    /* Defer during SCI setup on split link — replay when settled */
+    /* Only allow subrating changes when SCI is settled */
     k_spinlock_key_t key = k_spin_lock(&split_lc.lock);
     enum conn_state state = split_lc.state;
     k_spin_unlock(&split_lc.lock, key);
 
     if (state != CS_OPERATIONAL && state != CS_IDLE) {
+        /* Store desired tier for replay by on_operational().
+         * Last-writer-wins: multiple changes during SCI setup collapse
+         * to the most recent activity state, which is correct. */
         LOG_DBG("Deferring subrate tier %d — state=%s", tier, state_name(state));
         pending_tier = tier;
         has_pending_tier = true;
@@ -705,11 +648,6 @@ static void set_tier(enum subrate_tier tier) {
     }
 
     if (tier == current_tier && tier_confirmed) return;
-
-    /* Reset retry state on fresh tier requests (not retries from handler) */
-    if (tier != current_tier) {
-        tier_retry_count = 0;
-    }
 
     enum subrate_tier prev_tier = current_tier;
     current_tier = tier;
@@ -724,30 +662,22 @@ static void set_tier(enum subrate_tier tier) {
     default: return;
     }
 
-    LOG_DBG("Subrating: %s (factor=%d-%d, lat=%d, cn=%d)",
+    LOG_INF("Subrating: %s (factor=%d-%d, lat=%d, cn=%d)",
             tier_name, params->subrate_min, params->subrate_max,
             params->max_latency, params->continuation_number);
 
     bt_conn_le_subrate_set_defaults(params);
     bt_conn_foreach(BT_CONN_TYPE_LE, apply_subrate_to_conn, (void *)params);
 
-    if (!tier_confirmed && split_lc.conn) {
-        /* Only schedule retries when we have a live connection.
-         * Without this guard, pre-connection set_tier() from the
-         * activity listener finds no connections via bt_conn_foreach,
-         * tier_confirmed stays false, and the retry timer burns
-         * through TIER_MAX_RETRIES into the void. */
-        if (tier_retry_count == 0) {
-            /* LL subrate procedure runs at the CURRENT factor's cadence.
-             * At factor=15 with CI=2ms, events are 30ms apart so the
-             * handshake takes ~60ms.  Use current factor to size delay. */
-            tier_retry_delay_ms = last_confirmed_factor * 12 + 20;
+    if (!tier_confirmed) {
+        uint16_t target_factor = params->subrate_max;
+        uint16_t retry_ms;
+        if (target_factor <= last_confirmed_factor) {
+            retry_ms = 20;  /* aggressive → short retry */
+        } else {
+            retry_ms = last_confirmed_factor * 12 + 20;
         }
-        k_work_schedule(&tier_retry_work, K_MSEC(tier_retry_delay_ms));
-    } else if (!tier_confirmed) {
-        /* No connection yet — accept tier optimistically so we don't
-         * spin retries.  on_operational() will replay if needed. */
-        tier_confirmed = true;
+        k_work_schedule(&tier_retry_work, K_MSEC(retry_ms));
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_HOST_CONN_PARAM_DORMANT)
@@ -785,9 +715,7 @@ static void tier_retry_handler(struct k_work *work) {
             tier_retry_count = 0;
             return;
         }
-        tier_retry_delay_ms = MIN(tier_retry_delay_ms * 2, 500);
-        LOG_DBG("Retrying subrate tier (%d/%d, next %ums)",
-                tier_retry_count, TIER_MAX_RETRIES, tier_retry_delay_ms);
+        LOG_INF("Retrying subrate tier (%d/%d)", tier_retry_count, TIER_MAX_RETRIES);
         /* Don't set tier_confirmed = true before set_tier().
          * set_tier() checks (tier == current_tier && tier_confirmed)
          * and would no-op if we set it true first. */
@@ -814,7 +742,7 @@ static void on_operational(void) {
     if (has_pending_tier) {
         enum subrate_tier deferred = pending_tier;
         has_pending_tier = false;
-        LOG_DBG("Replaying deferred subrate tier: %d", deferred);
+        LOG_INF("Replaying deferred subrate tier: %d", deferred);
         set_tier(deferred);
         return;
     }
@@ -835,7 +763,7 @@ static void subrate_changed_cb(struct bt_conn *conn,
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr_str, sizeof(addr_str));
 
     if (params->status == BT_HCI_ERR_SUCCESS) {
-        LOG_DBG("Subrating [%s %s]: factor=%d, cn=%d",
+        LOG_INF("Subrating [%s %s]: factor=%d, cn=%d",
                 info.role == BT_CONN_ROLE_CENTRAL ? "central" : "peripheral",
                 addr_str, params->factor, params->continuation_number);
         if (info.role == BT_CONN_ROLE_CENTRAL) {
@@ -894,12 +822,6 @@ BT_CONN_CB_DEFINE(conn_lifecycle_cb) = {
 #if IS_ENABLED(CONFIG_BT_SUBRATING) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     .subrate_changed = subrate_changed_cb,
 #endif
-#if IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
-    .conn_rate_changed = conn_rate_changed_cb,
-#endif
-#if IS_ENABLED(CONFIG_BT_FRAME_SPACE_UPDATE)
-    .frame_space_updated = frame_space_updated_cb,
-#endif
 };
 
 /* ──── Public API: flush timeout for host connections ──── */
@@ -911,7 +833,7 @@ int sci_set_flush_timeout(struct bt_conn *conn) {
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info)) return -EINVAL;
 
-    /* interval_us / 625 = interval in 0.625ms slot units */
+    /* interval_us is in microseconds; convert to 0.625ms slots (divide by 625). */
     uint16_t ci_slots = (uint16_t)(info.le.interval_us / 625);
     uint16_t slots = MAX(MIN_FLUSH_SLOTS, ci_slots * 3);
     return send_flush_timeout(conn, slots);
@@ -945,7 +867,7 @@ static void set_default_rate_params(void) {
 
     int err = bt_hci_cmd_send(SDC_HCI_OPCODE_CMD_LE_SET_DEFAULT_RATE_PARAMS, buf);
     if (err) LOG_ERR("Set default rate params failed: %d", err);
-    else LOG_DBG("Default rate params: CI=%u us", SCI_TARGET_US);
+    else LOG_INF("Default rate params: CI=%u us", SCI_TARGET_US);
 }
 
 /* ──── Initialization ──── */

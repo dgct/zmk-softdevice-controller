@@ -422,6 +422,16 @@ int esb_read_rx_payload(struct esb_payload *payload);
  */
 int esb_start_tx(void);
 
+/** @brief Get elapsed microseconds in the current ESB ticker slot.
+ *
+ * Captures TIMER2 CC1 to read how many µs have passed since the
+ * current ticker slot opened. Only meaningful during an active slot
+ * (ticker mode). Returns 0 in standalone/MPSL mode.
+ *
+ * @return Elapsed µs in current slot.
+ */
+uint32_t esb_get_slot_elapsed_us(void);
+
 /** @brief Start receiving data.
  *
  * @retval 0 If successful.
@@ -615,6 +625,20 @@ int esb_set_bitrate(enum esb_bitrate bitrate);
  *           Otherwise, a (negative) error code is returned.
  */
 int esb_reuse_pid(uint8_t pipe);
+
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+/** @brief Set periodic RX window interval for power saving.
+ *
+ *  When set to 0 (default), the PRX requests EARLIEST timeslots continuously.
+ *  When set to a non-zero value (microseconds), the PRX requests NORMAL
+ *  timeslots spaced by the given interval, allowing the radio and HFXO to
+ *  sleep between windows.
+ *
+ *  @param[in] interval_us  Interval between RX windows in microseconds,
+ *                          or 0 for continuous listening.
+ */
+void esb_set_rx_interval(uint32_t interval_us);
+#endif
 
 /** @} */
 

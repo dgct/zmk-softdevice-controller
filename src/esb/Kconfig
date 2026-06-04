@@ -7,7 +7,6 @@
 menuconfig ESB
 	bool "Enhanced ShockBurst"
 	select NRFX_GPPI
-	select MPSL
 	help
 	  Enable ESB functionality.
 
@@ -61,6 +60,7 @@ choice ESB_SYS_TIMER
 	default ESB_SYS_TIMER0 if ESB_MPSL_TIMESLOT
 	default ESB_SYS_TIMER10 if ESB_MPSL_TIMESLOT
 	default ESB_SYS_TIMER020 if ESB_MPSL_TIMESLOT
+	default ESB_SYS_TIMER2 if ESB_TICKER_TIMESLOT
 	default ESB_SYS_TIMER021 if $(dt_nodelabel_has_compat,timer021,$(DT_COMPAT_NORDIC_NRF_TIMER))
 	default ESB_SYS_TIMER10 if $(dt_nodelabel_has_compat,timer10,$(DT_COMPAT_NORDIC_NRF_TIMER))
 	default ESB_SYS_TIMER2
@@ -140,10 +140,25 @@ config ESB_DYNAMIC_INTERRUPTS
 	  interrupts. This allows reconfiguring ESB_SYS_TIMER_IRQn, ESB_EVT_IRQ,
 	  and RADIO_IRQn handlers during runtime when ESB is uninitialized.
 
+choice ESB_RADIO_MODE
+	prompt "ESB radio access mode"
+	depends on ESB
+	default ESB_STANDALONE_RADIO
+	help
+	  Select how ESB accesses the radio. Standalone gives exclusive
+	  access. MPSL Timeslot and BLE Controller Ticker allow concurrent
+	  BLE operation.
+
+config ESB_STANDALONE_RADIO
+	bool "ESB standalone (exclusive radio)"
+	depends on !ESB_NEVER_DISABLE_TX
+	help
+	  ESB has exclusive radio access. No concurrent BLE.
+
 config ESB_MPSL_TIMESLOT
 	bool "ESB on MPSL Timeslot [EXPERIMENTAL]"
 	select EXPERIMENTAL
-	depends on MPSL
+	select MPSL
 	depends on !ESB_NEVER_DISABLE_TX
 	depends on !SOC_SERIES_NRF53
 	help
@@ -151,6 +166,40 @@ config ESB_MPSL_TIMESLOT
 	  It allows multiple protocols to be used concurrently. Using the Timeslot API can increase
 	  number of retransmissions, reduce ESB packets delivery rate, and cause the delay of
 	  retransmissions to vary.
+
+config ESB_TICKER_TIMESLOT
+	bool "ESB on BLE Controller Ticker"
+	select EXPERIMENTAL
+	select ESB_DYNAMIC_INTERRUPTS
+	depends on BT_CTLR_USER_EXT
+	depends on !ESB_NEVER_DISABLE_TX
+	help
+	  Uses the Zephyr open BLE LL ticker scheduler for ESB radio access.
+	  ESB runs as a first-class ticker node alongside BLE connections,
+	  eliminating the MPSL dependency. Requires BT_CTLR_USER_EXT to
+	  register ESB as a proprietary ticker node in the controller.
+
+endchoice
+
+config ESB_TICKER_INTERVAL_US
+	int "ESB ticker interval in microseconds"
+	default 5000
+	range 1250 20000
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  How often the ESB ticker node fires. Lower values give better
+	  ESB latency but reduce BLE throughput. 5000 (5ms) matches the
+	  default MPSL timeslot interval.
+
+config ESB_TICKER_SLOT_US
+	int "ESB ticker slot duration in microseconds"
+	default 2500
+	range 500 10000
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  Duration of each ESB radio slot. Must be shorter than the
+	  ticker interval to leave time for BLE events. The slot
+	  includes radio ramp-up, RX listen, and ACK transmission.
 
 config ESB_NEVER_DISABLE_TX
 	select EXPERIMENTAL

@@ -77,4 +77,54 @@ message(STATUS "  SoC: ${SDC_SOC_FAMILY}, Float: ${SDC_FLOAT_ABI}, Variant: ${SD
 message(STATUS "  SDC: ${SDC_LIB_DIR}/libsoftdevice_controller_${SDC_VARIANT}.a")
 message(STATUS "  MPSL: ${MPSL_LIB_DIR}/libmpsl.a")
 
+elseif(CONFIG_MPSL)
+# ── MPSL-only build (no SDC/BLE) ─────────────────────────────────────────
+# ESB selects MPSL but doesn't need the SoftDevice Controller.
+# Compile just the MPSL init, threading lock, and clock control.
+
+zephyr_library()
+
+if(NOT EXISTS ${NRFXLIB_DIR})
+  message(FATAL_ERROR "nrfxlib not found. Run 'west update' to fetch it.")
+endif()
+
+if(CONFIG_SOC_NRF52840)
+  set(SDC_SOC_FAMILY "nrf52")
+else()
+  message(FATAL_ERROR "Unsupported SoC for MPSL-only build.")
+endif()
+
+if(CONFIG_FPU)
+  set(SDC_FLOAT_ABI "hard-float")
+else()
+  set(SDC_FLOAT_ABI "soft-float")
+endif()
+
+zephyr_include_directories(
+  ${NRFXLIB_DIR}/mpsl/include
+  ${NRFXLIB_DIR}/mpsl/include/protocol
+  ${NRFXLIB_DIR}/mpsl/fem/include
+  mpsl
+)
+
+target_include_directories(zephyr_interface BEFORE INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/clock_control
+)
+
+zephyr_library_sources(
+  mpsl/mpsl_init.c
+  mpsl/multithreading_lock.c
+  clock_control/nrfx_clock_mpsl.c
+)
+
+set(MPSL_LIB_DIR ${NRFXLIB_DIR}/mpsl/lib/${SDC_SOC_FAMILY}/${SDC_FLOAT_ABI})
+set(MPSL_FEM_DIR ${NRFXLIB_DIR}/mpsl/fem/common/lib/${SDC_SOC_FAMILY}/${SDC_FLOAT_ABI})
+
+zephyr_link_libraries(${MPSL_LIB_DIR}/libmpsl.a)
+zephyr_link_libraries(${MPSL_FEM_DIR}/libmpsl_fem_common.a)
+
+message(STATUS "ZMK MPSL-only (no SDC):")
+message(STATUS "  SoC: ${SDC_SOC_FAMILY}, Float: ${SDC_FLOAT_ABI}")
+message(STATUS "  MPSL: ${MPSL_LIB_DIR}/libmpsl.a")
+
 endif()

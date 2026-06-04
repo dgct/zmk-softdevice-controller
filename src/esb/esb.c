@@ -24,9 +24,22 @@
 #include <zephyr/drivers/gpio.h>
 
 #include <mpsl_fem_protocol_api.h>
+/* MPSL timeslot types needed for variable declarations (always visible).
+ * Headers come from vendored nrfxlib — available regardless of CONFIG_MPSL.
+ */
 #include <mpsl_timeslot.h>
 #include <mpsl_hwres.h>
 #include <multithreading_lock.h>
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+#include "esb_ticker.h"
+/* Forward declarations — avoid pulling in ull_esb.h which needs lll.h
+ * (and lll.h has no include guards).
+ */
+int ull_esb_start(void);
+int ull_esb_stop(void);
+void ull_esb_request_start(void);
+#endif
 
 #include "esb_peripherals.h"
 #include "esb_ppi_api.h"
@@ -36,8 +49,15 @@
 
 LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 
-BUILD_ASSERT(!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) || ESB_NRF_TIMER_INSTANCE == MPSL_TIMER0,
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+BUILD_ASSERT(ESB_NRF_TIMER_INSTANCE == MPSL_TIMER0,
 	     "ESB Timer differ from MPSL Timer");
+#endif
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+BUILD_ASSERT(ESB_NRF_TIMER_INSTANCE != 0,
+	     "ESB Ticker mode must not use TIMER0 (reserved by BLE controller)");
+#endif
 
 /* Constants */
 
@@ -132,6 +152,7 @@ enum esb_state {
 	ESB_STATE_UNINITIALIZED, /* Uninitialized */
 	ESB_STATE_IDLE,		 /* Idle. */
 	ESB_STATE_WAIT_MPSL,	 /* Waiting for MPSL Timeslot */
+	ESB_STATE_WAIT_TICKER,	 /* Waiting for BLE controller ticker event */
 	ESB_STATE_PTX_TX,	 /* Transmitting without acknowledgment. */
 	ESB_STATE_PTX_TX_ACK,	 /* Transmitting with acknowledgment. */
 	ESB_STATE_PTX_RX_ACK,	 /* Transmitting with acknowledgment and
@@ -271,6 +292,23 @@ static uint32_t errata_216_timer_shorts;
 static esb_event_handler event_handler;
 static struct esb_payload *current_payload;
 
+#if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
+/* Diagnostic capture from ISR for deferred logging */
+static struct {
+	uint32_t base0;
+	uint32_t prefix0;
+	uint32_t frequency;
+	uint32_t rxmatch;
+	uint32_t rxcrc;
+	uint8_t  crc_ok;
+	uint8_t  hdr0;
+	uint8_t  hdr1;
+	bool     valid;
+} rx_diag;
+static uint32_t ts_start_count;
+static uint32_t ts_radio_count;
+#endif
+
 /* FIFOs and buffers */
 static struct payload_tx_fifo tx_fifo;
 static struct payload_rx_fifo rx_fifo;
@@ -343,6 +381,13 @@ static enum {
 	TS_NEXT_ACTION_CLOSE,
 } ts_next_action = TS_NEXT_ACTION_IDLE;
 
+/* Periodic RX interval in microseconds. 0 = continuous (EARLIEST), >0 = periodic (NORMAL). */
+static uint32_t esb_rx_interval_us;
+
+/* MPSL timeslot variables — always declared to allow IS_ENABLED() runtime checks.
+ * When CONFIG_ESB_MPSL_TIMESLOT=n, these are dead storage eliminated by the linker.
+ * MPSL types are available from vendored nrfxlib headers regardless of CONFIG_MPSL.
+ */
 static mpsl_timeslot_session_id_t ts_session_id = 0xFF;
 static mpsl_timeslot_signal_return_param_t ts_return_action;
 
@@ -353,7 +398,7 @@ static mpsl_timeslot_request_t ts_request_earliest = {
 	.request_type = MPSL_TIMESLOT_REQ_TYPE_EARLIEST,
 	.params.earliest = {
 		.hfclk = MPSL_TIMESLOT_HFCLK_CFG_XTAL_GUARANTEED,
-		.priority = MPSL_TIMESLOT_PRIORITY_NORMAL,
+		.priority = MPSL_TIMESLOT_PRIORITY_HIGH,
 		.length_us = 0,
 		.timeout_us = MPSL_TIMESLOT_EARLIEST_TIMEOUT_MAX_US,
 	}};
@@ -362,11 +407,18 @@ static mpsl_timeslot_request_t ts_request_normal = {
 	.request_type = MPSL_TIMESLOT_REQ_TYPE_NORMAL,
 	.params.normal = {
 		.hfclk = MPSL_TIMESLOT_HFCLK_CFG_XTAL_GUARANTEED,
-		.priority = MPSL_TIMESLOT_PRIORITY_NORMAL,
+		.priority = MPSL_TIMESLOT_PRIORITY_HIGH,
 	}};
 
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
 static mpsl_timeslot_signal_return_param_t *ts_callback(mpsl_timeslot_session_id_t session_id,
 							uint32_t signal);
+#endif /* CONFIG_ESB_MPSL_TIMESLOT */
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+/* Flag set when ticker event is complete (slot closed or action done). */
+static volatile bool esb_ticker_event_done_flag;
+#endif /* CONFIG_ESB_TICKER_TIMESLOT */
 
 /* These function pointers are changed dynamically, depending on protocol
  * configuration and state. Note that they will be 0 initialized.
@@ -381,6 +433,9 @@ static void on_radio_disabled_tx_wait_for_ack(void);
 static void on_radio_disabled_rx(void);
 static void on_radio_disabled_rx_send_ack(void);
 static void on_radio_disabled_suspend(void);
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+static void on_radio_disabled_ticker_close(void);
+#endif
 static void on_timer_compare1_tx_noack(void);
 
 /*  Function to do bytewise bit-swap on an unsigned 32-bit value */
@@ -1016,6 +1071,7 @@ static nrf_radio_txpower_t dbm_to_nrf_radio_txpower(int8_t tx_power)
 #endif /* defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L) */
 
 #if !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L))
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) || IS_ENABLED(CONFIG_ZMK_BT_LL_SOFTDEVICE)
 static mpsl_phy_t convert_bitrate_to_mpsl_phy(enum esb_bitrate bitrate)
 {
 	switch (bitrate) {
@@ -1034,11 +1090,13 @@ static mpsl_phy_t convert_bitrate_to_mpsl_phy(enum esb_bitrate bitrate)
 	default: return MPSL_PHY_NRF_1Mbit;
 	}
 }
+#endif /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) || IS_ENABLED(CONFIG_ZMK_BT_LL_SOFTDEVICE) */
 #endif /* !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L)) */
 
 static void update_radio_tx_power(void)
 {
 #if !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L))
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) || IS_ENABLED(CONFIG_ZMK_BT_LL_SOFTDEVICE)
 	int32_t err;
 	mpsl_tx_power_split_t tx_power;
 
@@ -1064,6 +1122,10 @@ static void update_radio_tx_power(void)
 #endif /* NRF53_SERIES */
 
 	nrf_radio_txpower_set(NRF_RADIO, tx_power.radio_tx_power);
+#else
+	/* No MPSL — set radio TX power directly (nRF52 TXPOWER register = dBm). */
+	nrf_radio_txpower_set(NRF_RADIO, (nrf_radio_txpower_t)esb_cfg.tx_output_power);
+#endif /* CONFIG_ESB_MPSL_TIMESLOT || CONFIG_ZMK_BT_LL_SOFTDEVICE */
 #else
 	nrf_radio_txpower_set(NRF_RADIO, dbm_to_nrf_radio_txpower(esb_cfg.tx_output_power));
 #endif /* !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L)) */
@@ -1307,14 +1369,33 @@ static void clear_peripherals(void)
 
 static void clear_ts_peripherals(void)
 {
-	irq_disable(ESB_RADIO_IRQ_NUMBER);
+	if (!IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Ticker mode: BLE controller owns RADIO IRQ — do not disable */
+		irq_disable(ESB_RADIO_IRQ_NUMBER);
+	}
 	clear_peripherals();
 	esb_ppi_deinit();
 }
 
 static void esb_timer_handler(nrf_timer_event_t event_type, void *context)
 {
-	if (IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && event_type == NRF_TIMER_EVENT_COMPARE0) {
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	if (event_type == NRF_TIMER_EVENT_COMPARE0) {
+		/* Ticker slot duration expired. Clear shorts BEFORE triggering
+		 * DISABLE — the hardware SHORT DISABLED→TXEN fires atomically
+		 * with the DISABLED event, so clearing after DISABLE is too late
+		 * and causes a ghost TX burst on stale buffer contents.
+		 */
+		nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+		nrf_radio_shorts_set(NRF_RADIO, 0);
+		ts_next_action = TS_NEXT_ACTION_CLOSE;
+		on_radio_disabled = on_radio_disabled_ticker_close;
+		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+	}
+#endif
+
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	if (event_type == NRF_TIMER_EVENT_COMPARE0) {
 		switch (ts_next_action) {
 		case TS_NEXT_ACTION_RX:
 			ts_return_action.params.extend.length_us =
@@ -1347,6 +1428,7 @@ static void esb_timer_handler(nrf_timer_event_t event_type, void *context)
 			break;
 		}
 	}
+#endif /* CONFIG_ESB_MPSL_TIMESLOT */
 
 	if (IS_ENABLED(CONFIG_ESB_NEVER_DISABLE_TX) && event_type == NRF_TIMER_EVENT_COMPARE1) {
 		if (on_timer_compare1 != NULL) {
@@ -2063,6 +2145,18 @@ static void on_radio_disabled_rx(void)
 		return;
 	}
 
+#if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
+	rx_diag.base0 = nrf_radio_base0_get(NRF_RADIO);
+	rx_diag.prefix0 = nrf_radio_prefix0_get(NRF_RADIO);
+	rx_diag.frequency = NRF_RADIO->FREQUENCY;
+	rx_diag.rxmatch = nrf_radio_rxmatch_get(NRF_RADIO);
+	rx_diag.rxcrc = nrf_radio_rxcrc_get(NRF_RADIO);
+	rx_diag.crc_ok = 1;
+	rx_diag.hdr0 = rx_payload_buffer[0];
+	rx_diag.hdr1 = rx_payload_buffer[1];
+	rx_diag.valid = true;
+#endif
+
 	if (atomic_get(&rx_fifo.count) >= CONFIG_ESB_RX_FIFO_SIZE) {
 		clear_events_restart_rx();
 		return;
@@ -2169,9 +2263,51 @@ static void on_radio_disabled_suspend(void)
 	clear_ts_peripherals();
 
 	on_radio_disabled = NULL;
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
 	esb_state = ESB_STATE_WAIT_MPSL;
 	ts_return_action.callback_action = MPSL_TIMESLOT_SIGNAL_ACTION_END;
+#else
+	esb_state = ESB_STATE_IDLE;
+#endif
 }
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+static void on_radio_disabled_ticker_close(void)
+{
+	/* This runs inside radio_irq_handler() — the radio has already
+	 * transitioned to DISABLED state and the event was cleared by
+	 * radio_irq_handler(). We must NOT call clear_peripherals() because
+	 * it triggers RADIO_TASK_DISABLE and spin-waits for the DISABLED
+	 * event. Since the radio is already disabled, that event never
+	 * fires → infinite loop in ISR → hard lockup.
+	 *
+	 * Instead, do ticker-safe cleanup: release ESB peripherals (PPI,
+	 * FEM, timer) without touching the radio state machine.
+	 */
+	esb_ppi_disable_all();
+	esb_ppi_deinit();
+	esb_fem_reset();
+
+	/* Clear radio shorts and ESB interrupt enables. We must disable
+	 * all radio interrupts that ESB enabled (DISABLED, END) but then
+	 * re-enable the DISABLED interrupt — BLE's lll_init() enables it
+	 * once and never re-enables it. If we leave it disabled, BLE can
+	 * never receive DISABLED ISR callbacks and all events hang.
+	 */
+	nrf_radio_shorts_set(NRF_RADIO, 0);
+	nrf_radio_int_disable(NRF_RADIO, 0xFFFFFFFF);
+	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
+	errata_216_off();
+
+	/* Stop ESB slot timer */
+	nrf_timer_shorts_set(esb_timer.p_reg, 0);
+	nrf_timer_int_disable(esb_timer.p_reg, 0xFFFFFFFF);
+
+	on_radio_disabled = NULL;
+	esb_state = ESB_STATE_WAIT_TICKER;
+	esb_ticker_event_done_flag = true;
+}
+#endif /* CONFIG_ESB_TICKER_TIMESLOT */
 
 static void fast_switching_set_channel(uint8_t channel)
 {
@@ -2372,7 +2508,8 @@ int esb_init(const struct esb_config *config)
 		return -EINVAL;
 	}
 
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
+	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Standalone mode: full radio + timer + PPI init at startup */
 		if (!update_radio_parameters()) {
 			LOG_ERR("Failed to update radio parameters");
 			return -EINVAL;
@@ -2409,7 +2546,32 @@ int esb_init(const struct esb_config *config)
 
 		esb_state = ESB_STATE_IDLE;
 
-	} else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
+	}
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	else {
+		/* Ticker mode: timer init at startup, radio + PPI per-event.
+		 * BLE controller owns RADIO — no radio/PPI init here.
+		 */
+		if (!(update_radio_bitrate(esb_cfg.bitrate) && verify_radio_protocol() &&
+		      verify_radio_crc())) {
+			LOG_ERR("Failed to update radio parameters");
+			return -EINVAL;
+		}
+
+		err = sys_timer_init();
+		if (err) {
+			LOG_ERR("Failed to initialize ESB system timer");
+			return err;
+		}
+
+		esb_ticker_event_done_flag = false;
+		esb_state = ESB_STATE_IDLE;
+		LOG_INF("ESB init: ticker mode, timer=%d", ESB_NRF_TIMER_INSTANCE);
+
+	}
+#endif /* CONFIG_ESB_TICKER_TIMESLOT */
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
 		if (esb_cfg.mode == ESB_MODE_MONITOR) {
 			LOG_ERR("Primary monitor mode is not supported in Timeslots");
 			return -EPERM;
@@ -2433,6 +2595,7 @@ int esb_init(const struct esb_config *config)
 
 		esb_state = ESB_STATE_IDLE;
 	}
+#endif /* CONFIG_ESB_MPSL_TIMESLOT */
 
 #if IS_ENABLED(CONFIG_ESB_DYNAMIC_INTERRUPTS)
 
@@ -2445,7 +2608,16 @@ int esb_init(const struct esb_config *config)
 	irq_connect_dynamic(ESB_EVT_IRQ_NUMBER, CONFIG_ESB_EVENT_IRQ_PRIORITY,
 			    evt_dynamic_irq_handler, NULL, 0);
 
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
+	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Standalone mode: ESB owns both RADIO and TIMER IRQs */
+#if !defined(CONFIG_ESB_MPSL_TIMESLOT) && !defined(CONFIG_ESB_TICKER_TIMESLOT)
+		/* ARM_IRQ_DIRECT_DYNAMIC_CONNECT uses Z_ISR_DECLARE with
+		 * __attribute__((used)) — the .intList entry survives dead code
+		 * elimination even inside a runtime if(false) branch.  Must use
+		 * preprocessor guard to prevent the RADIO ISR vector table entry
+		 * from being overwritten with the dynamic dispatch trampoline,
+		 * which would steal the BLE controller's RADIO handler.
+		 */
 		ARM_IRQ_DIRECT_DYNAMIC_CONNECT(ESB_RADIO_IRQ_NUMBER, CONFIG_ESB_RADIO_IRQ_PRIORITY,
 					0, reschedule);
 		ARM_IRQ_DIRECT_DYNAMIC_CONNECT(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
@@ -2455,18 +2627,37 @@ int esb_init(const struct esb_config *config)
 				radio_dynamic_irq_handler, NULL, 0);
 		irq_connect_dynamic(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
 				timer_dynamic_irq_handler, NULL, 0);
+#endif
+	} else if (IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Ticker mode: BLE controller owns RADIO IRQ.
+		 * ESB only installs its own TIMER IRQ handler.
+		 */
+		ARM_IRQ_DIRECT_DYNAMIC_CONNECT(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
+					0, reschedule);
+		irq_connect_dynamic(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
+				timer_dynamic_irq_handler, NULL, 0);
 	}
 
 #else /* !IS_ENABLED(CONFIG_ESB_DYNAMIC_INTERRUPTS) */
 
 	IRQ_DIRECT_CONNECT(ESB_EVT_IRQ_NUMBER, CONFIG_ESB_EVENT_IRQ_PRIORITY,
 			   esb_evt_direct_irq_handler, 0);
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
-		IRQ_DIRECT_CONNECT(ESB_RADIO_IRQ_NUMBER, CONFIG_ESB_RADIO_IRQ_PRIORITY,
-				esb_radio_direct_irq_handler, 0);
-		IRQ_DIRECT_CONNECT(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
-				ESB_TIMER_IRQ_HANDLER, 0);
-	}
+	/* IRQ_DIRECT_CONNECT uses __used section attributes that survive dead
+	 * code elimination — a runtime if(!IS_ENABLED()) is not sufficient to
+	 * prevent the ISR from being placed in the vector table.  Use a
+	 * preprocessor guard so the macro is never expanded in MPSL/ticker mode,
+	 * which would steal the RADIO IRQ from the BLE controller's handler.
+	 */
+#if !IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	IRQ_DIRECT_CONNECT(ESB_RADIO_IRQ_NUMBER, CONFIG_ESB_RADIO_IRQ_PRIORITY,
+			esb_radio_direct_irq_handler, 0);
+	IRQ_DIRECT_CONNECT(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
+			ESB_TIMER_IRQ_HANDLER, 0);
+#elif IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	/* Ticker mode: only TIMER IRQ (RADIO owned by BLE controller) */
+	IRQ_DIRECT_CONNECT(ESB_TIMER_IRQ, CONFIG_ESB_EVENT_IRQ_PRIORITY,
+			ESB_TIMER_IRQ_HANDLER, 0);
+#endif
 
 #endif /* IS_ENABLED(CONFIG_ESB_DYNAMIC_INTERRUPTS) */
 
@@ -2475,8 +2666,12 @@ int esb_init(const struct esb_config *config)
 		nrf_egu_event_clear(ESB_EGU, ESB_EGU_EVT_EVENT);
 		nrf_egu_int_enable(ESB_EGU, ESB_EGU_EVT_INT);
 	}
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
+	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Standalone: enable both RADIO and TIMER IRQs */
 		irq_enable(ESB_RADIO_IRQ_NUMBER);
+		irq_enable(ESB_TIMER_IRQ);
+	} else if (IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Ticker: only TIMER IRQ (RADIO dispatched by controller) */
 		irq_enable(ESB_TIMER_IRQ);
 	}
 
@@ -2492,12 +2687,30 @@ int esb_suspend(void)
 		return -EALREADY;
 	}
 
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
+	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
 		on_radio_disabled = NULL;
 		clear_peripherals();
 		esb_state = ESB_STATE_IDLE;
 
-	} else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
+	}
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	else {
+		/* Ticker mode: stop the ticker and set close action.
+		 * The ticker event will clean up on next radio disabled.
+		 */
+		ull_esb_stop();
+		ts_next_action = TS_NEXT_ACTION_CLOSE;
+		if (esb_state == ESB_STATE_WAIT_TICKER) {
+			esb_state = ESB_STATE_IDLE;
+		} else {
+			on_radio_disabled = on_radio_disabled_ticker_close;
+			nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+		}
+
+	}
+#endif /* CONFIG_ESB_TICKER_TIMESLOT */
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
 		ts_next_action = TS_NEXT_ACTION_CLOSE;
 		on_radio_disabled = on_radio_disabled_suspend;
 
@@ -2510,6 +2723,7 @@ int esb_suspend(void)
 			nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
 		}
 	}
+#endif /* CONFIG_ESB_MPSL_TIMESLOT */
 
 	return 0;
 }
@@ -2537,7 +2751,9 @@ void esb_disable(void)
 
 		esb_state = ESB_STATE_UNINITIALIZED;
 
-	} else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
+	}
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+	else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
 		/* need to be assigned before checks */
 		ts_next_action = TS_NEXT_ACTION_CLOSE;
 		on_radio_disabled = on_radio_disabled_suspend;
@@ -2564,12 +2780,20 @@ void esb_disable(void)
 		ts_session_id = 0xFF;
 		esb_state = ESB_STATE_UNINITIALIZED;
 	}
+#endif /* CONFIG_ESB_MPSL_TIMESLOT */
 }
 
 bool esb_is_idle(void)
 {
 	return (esb_state == ESB_STATE_IDLE);
 }
+
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+void esb_set_rx_interval(uint32_t interval_us)
+{
+	esb_rx_interval_us = interval_us;
+}
+#endif
 
 static struct payload_wrap *find_free_payload_cont(void)
 {
@@ -2759,8 +2983,21 @@ int esb_start_rx(void)
 		return -EPERM;
 	}
 
-	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
+	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) && !IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Standalone: start RX directly */
 		start_rx_listening();
+	} else if (IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)) {
+		/* Ticker mode: set the pending action and request deferred
+		 * ticker start. ull_esb_request_start() submits a work item
+		 * that only proceeds when both ESB state is set (here) and
+		 * ULL is initialized (ull_esb_init from bt_enable). This is
+		 * order-independent — works regardless of whether bt_enable()
+		 * runs before or after this SYS_INIT call.
+		 */
+		ts_next_action = TS_NEXT_ACTION_RX;
+		esb_state = ESB_STATE_WAIT_TICKER;
+		LOG_INF("ESB: start_rx in ticker mode (deferred)");
+		ull_esb_request_start();
 	} else {
 		int err;
 
@@ -3081,6 +3318,9 @@ int esb_reuse_pid(uint8_t pipe)
 
 static mpsl_timeslot_signal_return_param_t *ts_start_action(void)
 {
+#if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
+	ts_start_count++;
+#endif
 	nrf_radio_mode_set(NRF_RADIO, (nrf_radio_mode_t)esb_cfg.bitrate);
 	update_radio_crc();
 	update_rf_payload_format(esb_cfg.payload_length);
@@ -3180,6 +3420,9 @@ static mpsl_timeslot_signal_return_param_t *ts_timer_action(void)
 
 static mpsl_timeslot_signal_return_param_t *ts_radio_action(void)
 {
+#if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
+	ts_radio_count++;
+#endif
 	radio_irq_handler();
 
 	/* radio interrupt handlers can tweak ts_return_action */
@@ -3224,8 +3467,10 @@ static mpsl_timeslot_signal_return_param_t *ts_extend_succeeded_action(void)
 	case TS_NEXT_ACTION_RX: {
 		/* MPSL and ESB timers are in different domain which results in drift.
 		 * Limit number of Timeslot extensions to limit drift accumulation.
+		 * In periodic mode, cap extensions to keep windows short (~6.5 ms)
+		 * so the radio sleeps between windows.
 		 */
-		const uint16_t max_extends = 2000;
+		const uint16_t max_extends = (esb_rx_interval_us > 0) ? 10 : 2000;
 
 		ts_duration_params.extend_count++;
 		if (ts_duration_params.extend_count >= max_extends) {
@@ -3258,8 +3503,13 @@ static mpsl_timeslot_signal_return_param_t *ts_blocked_action(mpsl_timeslot_sess
 	switch (ts_next_action) {
 	case TS_NEXT_ACTION_TX:
 	case TS_NEXT_ACTION_RX:
-		/* @ref multithreading_lock is acquired by MPSL subsys low_prio_work. */
-		err = mpsl_timeslot_request(ts_session_id, &ts_request_earliest);
+		if (esb_rx_interval_us > 0 && ts_next_action == TS_NEXT_ACTION_RX) {
+			/* Periodic mode: retry NORMAL with bumped distance. */
+			ts_request_normal.params.normal.distance_us += 500;
+			err = mpsl_timeslot_request(ts_session_id, &ts_request_normal);
+		} else {
+			err = mpsl_timeslot_request(ts_session_id, &ts_request_earliest);
+		}
 		if (err) {
 			process_ts_request_error(err);
 		}
@@ -3319,7 +3569,15 @@ static mpsl_timeslot_signal_return_param_t *ts_idle_action(mpsl_timeslot_session
 		}
 
 		/* @ref multithreading_lock is acquired by MPSL subsys low_prio_work */
-		err = mpsl_timeslot_request(ts_session_id, &ts_request_earliest);
+		if (esb_rx_interval_us > 0 && ts_next_action == TS_NEXT_ACTION_RX) {
+			/* Periodic mode: schedule next window after interval. */
+			ts_request_normal.params.normal.distance_us = esb_rx_interval_us;
+			ts_request_normal.params.normal.length_us =
+				2 * ts_duration_params.rx_tx_sequence;
+			err = mpsl_timeslot_request(ts_session_id, &ts_request_normal);
+		} else {
+			err = mpsl_timeslot_request(ts_session_id, &ts_request_earliest);
+		}
 		if (err) {
 			process_ts_request_error(err);
 			break;
@@ -3379,3 +3637,181 @@ static mpsl_timeslot_signal_return_param_t *ts_callback(mpsl_timeslot_session_id
 
 	return NULL;
 }
+
+/* ========================================================================
+ * ESB Ticker Integration API
+ *
+ * These functions are called by the BLE controller's ULL/LLL ESB ticker
+ * node (ull_esb.c / lll_esb.c) to configure, operate, and clean up the
+ * radio for ESB protocol during ticker events.
+ * ======================================================================== */
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+
+int esb_ticker_event_start(uint32_t slot_duration_us)
+{
+	int err;
+
+	esb_ticker_event_done_flag = false;
+
+	/* Full radio reconfiguration — same sequence as ts_start_action() */
+	nrf_radio_mode_set(NRF_RADIO, (nrf_radio_mode_t)esb_cfg.bitrate);
+	update_radio_crc();
+	update_rf_payload_format(esb_cfg.payload_length);
+
+	update_radio_addresses(ADDR_UPDATE_MASK_BASE0 | ADDR_UPDATE_MASK_BASE1 |
+			       ADDR_UPDATE_MASK_PREFIX);
+
+	nrf_radio_fast_ramp_up_enable_set(NRF_RADIO, esb_cfg.use_fast_ramp_up);
+	apply_radio_init_workarounds();
+
+	/* Allocate PPI channels for this event */
+	err = esb_ppi_init();
+	if (err) {
+		LOG_ERR("ESB ticker: PPI init failed (%d)", err);
+		esb_ticker_event_done_flag = true;
+		return err;
+	}
+
+	disable_event.event.generic.event = esb_ppi_radio_disabled_get();
+
+	/* Set up slot-end timer: CC0 fires after slot_duration_us,
+	 * triggering on_radio_disabled_ticker_close.
+	 */
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_STOP);
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_CLEAR);
+	nrf_timer_shorts_set(esb_timer.p_reg, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK);
+	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL0, slot_duration_us);
+	nrf_timer_event_clear(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0);
+	nrf_timer_int_enable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
+
+	/* Start the pending action */
+	switch (ts_next_action) {
+	case TS_NEXT_ACTION_RX:
+		start_rx_listening();
+		break;
+
+	case TS_NEXT_ACTION_TX:
+		nrf_timer_shorts_set(esb_timer.p_reg, 0);
+		start_tx_transaction();
+		break;
+
+	case TS_NEXT_ACTION_CLOSE:
+	case TS_NEXT_ACTION_IDLE:
+		esb_ppi_deinit();
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
+		nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+		esb_ticker_event_done_flag = true;
+		return -ECANCELED;
+
+	default:
+		LOG_WRN("ESB ticker: unexpected action %d", ts_next_action);
+		esb_ppi_deinit();
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
+		nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+		esb_ticker_event_done_flag = true;
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+bool esb_ticker_radio_handler(void)
+{
+	radio_irq_handler();
+	return esb_ticker_event_done_flag;
+}
+
+void esb_ticker_event_end(void)
+{
+	if (!esb_ticker_event_done_flag) {
+		/* Force-close: event didn't complete normally. The abort
+		 * handler (esb_ticker_event_abort) already cleaned up ESB
+		 * peripherals and the radio is now disabled. Do NOT call
+		 * clear_peripherals() — the radio disable-and-wait loop
+		 * would hang since the radio is already in DISABLED state.
+		 * Just ensure PPI and radio interrupts are clean.
+		 * Re-enable DISABLED interrupt — BLE's lll_init() set it
+		 * once and never re-enables.
+		 */
+		esb_ppi_disable_all();
+		esb_ppi_deinit();
+		nrf_radio_shorts_set(NRF_RADIO, 0);
+		nrf_radio_int_disable(NRF_RADIO, 0xFFFFFFFF);
+		nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
+		errata_216_off();
+		on_radio_disabled = NULL;
+	}
+
+	/* Stop the slot-end timer */
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
+	nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+
+	/* Reset ts_next_action back to RX so esb_ticker_is_active() returns
+	 * true on the next tick. Without this, the timer handler's
+	 * TS_NEXT_ACTION_CLOSE causes ESB to stop after one event.
+	 */
+	if (esb_cfg.mode == ESB_MODE_PRX) {
+		ts_next_action = TS_NEXT_ACTION_RX;
+	} else {
+		ts_next_action = TS_NEXT_ACTION_TX;
+	}
+	esb_state = ESB_STATE_WAIT_TICKER;
+}
+
+void esb_ticker_event_abort(void)
+{
+	/* Abort-safe cleanup: free ESB-specific peripherals but do NOT
+	 * touch the radio interrupt enable bits. The BLE controller's LLL
+	 * framework needs radio interrupts enabled so that radio_disable() →
+	 * DISABLED event → ISR → lll_done() can complete the done handshake.
+	 *
+	 * MUST clear radio shorts — ESB RX uses DISABLED→TXEN which would
+	 * otherwise chain into an infinite TX loop after radio_disable().
+	 */
+	nrf_radio_shorts_set(NRF_RADIO, 0);
+	esb_ppi_disable_all();
+	esb_ppi_deinit();
+	esb_fem_reset();
+	on_radio_disabled = NULL;
+
+	/* Stop the slot-end timer */
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
+	nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+
+	esb_state = ESB_STATE_WAIT_TICKER;
+	esb_ticker_event_done_flag = true;
+}
+
+void esb_ticker_slot_close(void)
+{
+	nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
+	ts_next_action = TS_NEXT_ACTION_CLOSE;
+	on_radio_disabled = on_radio_disabled_ticker_close;
+	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+}
+
+bool esb_ticker_is_active(void)
+{
+	return (esb_state == ESB_STATE_WAIT_TICKER) &&
+	       (ts_next_action == TS_NEXT_ACTION_RX || ts_next_action == TS_NEXT_ACTION_TX);
+}
+
+bool esb_ticker_event_is_done(void)
+{
+	return esb_ticker_event_done_flag;
+}
+
+void esb_ticker_mark_idle(void)
+{
+	esb_ticker_event_done_flag = true;
+}
+
+uint32_t esb_get_slot_elapsed_us(void)
+{
+	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_CAPTURE1);
+	return nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1);
+}
+
+#endif /* CONFIG_ESB_TICKER_TIMESLOT */

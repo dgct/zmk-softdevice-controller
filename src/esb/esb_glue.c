@@ -182,3 +182,19 @@ BUILD_ASSERT(false, "No Clock Control driver");
 #endif /* defined(CONFIG_CLOCK_CONTROL_NRF) */
 
 #endif /* defined(CONFIG_ESB_CLOCK_INIT) */
+
+/*
+ * When building without MPSL (CONFIG_ESB_MPSL_TIMESLOT=n, CONFIG_BT=n),
+ * libmpsl_fem_common.a (no-op FEM stubs) still references this MPSL core
+ * symbol. Provide a trivial stub that returns the requested power as-is.
+ */
+#if !IS_ENABLED(CONFIG_ZMK_BT_LL_SOFTDEVICE)
+#include <mpsl_tx_power.h>
+
+mpsl_tx_power_t mpsl_tx_power_radio_supported_power_adjust(
+	mpsl_tx_power_t req_radio_power, int8_t tx_power_ceiling)
+{
+	ARG_UNUSED(tx_power_ceiling);
+	return req_radio_power;
+}
+#endif /* !CONFIG_ZMK_BT_LL_SOFTDEVICE */

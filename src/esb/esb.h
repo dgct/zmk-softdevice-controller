@@ -640,6 +640,23 @@ int esb_reuse_pid(uint8_t pipe);
 void esb_set_rx_interval(uint32_t interval_us);
 #endif
 
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+/** @brief Change the ESB ticker period at runtime (ticker mode).
+ *
+ *  Lets the central harmonize the ESB radio schedule with the live BLE host
+ *  connection interval. The period is changed by stopping and restarting the
+ *  ESB ticker (deferred to thread context). The value is clamped to
+ *  [1250, 20000] us; a request equal to the current period is a no-op.
+ *
+ *  @param[in] interval_us  New ESB ticker period in microseconds.
+ *  @retval 0 on success (including no-op), negative errno on failure.
+ */
+int esb_set_ticker_interval_us(uint32_t interval_us);
+
+/** @brief Get the current ESB ticker period in microseconds (ticker mode). */
+uint32_t esb_get_ticker_interval_us(void);
+#endif
+
 /** @} */
 
 #ifdef __cplusplus

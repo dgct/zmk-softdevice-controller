@@ -39,6 +39,8 @@
 int ull_esb_start(void);
 int ull_esb_stop(void);
 void ull_esb_request_start(void);
+int ull_esb_reconfigure(uint32_t interval_us);
+uint32_t ull_esb_get_interval_us(void);
 #endif
 
 #include "esb_peripherals.h"
@@ -2306,6 +2308,16 @@ static void on_radio_disabled_ticker_close(void)
 	on_radio_disabled = NULL;
 	esb_state = ESB_STATE_WAIT_TICKER;
 	esb_ticker_event_done_flag = true;
+}
+
+int esb_set_ticker_interval_us(uint32_t interval_us)
+{
+	return ull_esb_reconfigure(interval_us);
+}
+
+uint32_t esb_get_ticker_interval_us(void)
+{
+	return ull_esb_get_interval_us();
 }
 #endif /* CONFIG_ESB_TICKER_TIMESLOT */
 

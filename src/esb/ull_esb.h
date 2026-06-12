@@ -74,6 +74,24 @@ void ull_esb_request_start(void);
 int ull_esb_stop(void);
 
 /**
+ * @brief Change the ESB ticker period at runtime.
+ *
+ * The ESB ticker period cannot be altered in place (ticker_update only
+ * adjusts drift/slot), so this defers a ticker stop+restart to thread
+ * context. The interval is clamped to [1250, 20000] us. A no-op (and a
+ * 0 return) if the requested interval equals the current one.
+ *
+ * @param interval_us  New ESB ticker period in microseconds.
+ * @return 0 on success (including no-op), negative errno on failure.
+ */
+int ull_esb_reconfigure(uint32_t interval_us);
+
+/**
+ * @brief Get the current ESB ticker period in microseconds.
+ */
+uint32_t ull_esb_get_interval_us(void);
+
+/**
  * @brief Process an ESB event-done signal.
  *
  * Called from ull_proprietary_done() in ull_vendor.h when the LLL ESB

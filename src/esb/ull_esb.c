@@ -36,6 +36,15 @@ LOG_MODULE_REGISTER(ull_esb, CONFIG_ESB_LOG_LEVEL);
 static struct ull_esb esb_ctx;
 static bool esb_ticker_running;
 
+/* Runtime ESB ticker period. Seeded from Kconfig, but adjusted at runtime by
+ * ull_esb_reconfigure() so the central can harmonize the ESB schedule with the
+ * live BLE host connection interval. The ticker period can only be changed by
+ * stopping and restarting the ticker (ticker_update cannot alter the periodic
+ * interval), so reconfigure defers a stop+start to thread context.
+ */
+static uint32_t esb_ticker_interval_us = CONFIG_ESB_TICKER_INTERVAL_US;
+static atomic_t esb_pending_interval_us;
+
 /* Mayfly for dispatching LLL prepare from ULL context */
 static memq_link_t mfy_lll_link;
 static struct mayfly mfy_lll_prepare = {0U, 0U, &mfy_lll_link, NULL, NULL};
@@ -143,6 +152,68 @@ void ull_esb_request_start(void)
 	k_work_schedule(&deferred_ticker_start, K_SECONDS(3));
 }
 
+/**
+ * @brief Apply a pending ESB ticker interval change (thread context).
+ *
+ * Stops the running ticker, swaps in the new period, and restarts it.
+ * Both ticker ops are enqueued from TICKER_USER_ID_THREAD and are therefore
+ * processed in order by the ticker job, so the stop completes before the
+ * restart takes effect.
+ */
+static void esb_reconfigure_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	uint32_t want = (uint32_t)atomic_set(&esb_pending_interval_us, 0);
+
+	if (want == 0U || want == esb_ticker_interval_us) {
+		return;
+	}
+
+	bool was_running = esb_ticker_running;
+
+	if (was_running) {
+		(void)ull_esb_stop();
+	}
+
+	esb_ticker_interval_us = want;
+
+	if (was_running) {
+		int err = ull_esb_start();
+
+		if (err && err != -EALREADY) {
+			LOG_ERR("ULL ESB: restart after reconfigure failed (%d)", err);
+			return;
+		}
+	}
+
+	LOG_INF("ULL ESB: reconfigured interval -> %u us", want);
+}
+static K_WORK_DEFINE(esb_reconfigure_work, esb_reconfigure_handler);
+
+int ull_esb_reconfigure(uint32_t interval_us)
+{
+	if (interval_us < 1250U) {
+		interval_us = 1250U;
+	} else if (interval_us > 20000U) {
+		interval_us = 20000U;
+	}
+
+	if (interval_us == esb_ticker_interval_us) {
+		return 0;
+	}
+
+	atomic_set(&esb_pending_interval_us, (atomic_val_t)interval_us);
+	k_work_submit(&esb_reconfigure_work);
+
+	return 0;
+}
+
+uint32_t ull_esb_get_interval_us(void)
+{
+	return esb_ticker_interval_us;
+}
+
 int ull_esb_start(void)
 {
 	uint32_t ticks_anchor;
@@ -155,8 +226,8 @@ int ull_esb_start(void)
 		return -EALREADY;
 	}
 
-	ticks_periodic = HAL_TICKER_US_TO_TICKS(CONFIG_ESB_TICKER_INTERVAL_US);
-	remainder_periodic = HAL_TICKER_REMAINDER(CONFIG_ESB_TICKER_INTERVAL_US);
+	ticks_periodic = HAL_TICKER_US_TO_TICKS(esb_ticker_interval_us);
+	remainder_periodic = HAL_TICKER_REMAINDER(esb_ticker_interval_us);
 	ticks_slot = HAL_TICKER_US_TO_TICKS(CONFIG_ESB_TICKER_SLOT_US);
 	ticks_anchor = ticker_ticks_now_get();
 
@@ -185,7 +256,7 @@ int ull_esb_start(void)
 	esb_ticker_running = true;
 
 	LOG_INF("ULL ESB: ticker started (interval=%u us, slot=%u us)",
-		CONFIG_ESB_TICKER_INTERVAL_US, CONFIG_ESB_TICKER_SLOT_US);
+		esb_ticker_interval_us, CONFIG_ESB_TICKER_SLOT_US);
 
 	return 0;
 }

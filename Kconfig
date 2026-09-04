@@ -161,7 +161,7 @@ menuconfig ZMK_BLE_SCI
 
 	  Negotiated via standard LL_CONNECTION_RATE_REQUEST PDUs —
 	  no vendor-specific LLPM handshake needed. Requires both sides
-	  to run nrfxlib v3.3.0+ with SCI support enabled.
+	  to run nrfxlib v3.4.0+ with SCI support enabled.
 
 	  The host link (to macOS/Windows/Linux) is unaffected — SCI
 	  only applies to connections where the local device is the

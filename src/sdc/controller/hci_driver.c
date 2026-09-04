@@ -918,12 +918,25 @@ static int configure_supported_features(void)
 
 #if defined(CONFIG_BT_CTLR_SDC_CS_ROLE_INITIATOR_ONLY) || \
 	defined(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)
-	sdc_support_channel_sounding_initiator_role();
+	/* nrfxlib v3.4.0: per-role variants replace the deprecated
+	 * sdc_support_channel_sounding_initiator_role().
+	 */
+	if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+		sdc_support_channel_sounding_initiator_role_central();
+	}
+	if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+		sdc_support_channel_sounding_initiator_role_peripheral();
+	}
 #endif
 
 #if defined(CONFIG_BT_CTLR_SDC_CS_ROLE_REFLECTOR_ONLY) || \
 	defined(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)
-	sdc_support_channel_sounding_reflector_role();
+	if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+		sdc_support_channel_sounding_reflector_role_central();
+	}
+	if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+		sdc_support_channel_sounding_reflector_role_peripheral();
+	}
 #endif
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_LE_POWER_CLASS_1)) {
@@ -931,7 +944,15 @@ static int configure_supported_features(void)
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)) {
-		sdc_support_extended_feature_set();
+		/* nrfxlib v3.4.0 deprecated sdc_support_extended_feature_set() in
+		 * favour of per-role variants (mirrors sdk-nrf v3.4.0 hci_driver.c).
+		 */
+		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+			sdc_support_extended_feature_set_central();
+		}
+		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+			sdc_support_extended_feature_set_peripheral();
+		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)) {

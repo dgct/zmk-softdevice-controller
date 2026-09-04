@@ -43,8 +43,13 @@ zephyr_library_sources(
   controller/hci_internal_wrappers.c
   mpsl/mpsl_init.c
   mpsl/multithreading_lock.c
-  clock_control/nrfx_clock_mpsl.c
 )
+
+# MPSL-backed nrfx clock shim. Zephyr <= 4.4 (legacy CONFIG_CLOCK_CONTROL_NRF
+# driver) consumes the monolithic nrfx_clock API; Zephyr >= 4.5's per-clock
+# drivers consume the split nrfx_clock_hfclk/lfclk API.
+zephyr_library_sources_ifdef(CONFIG_CLOCK_CONTROL_NRF clock_control/nrfx_clock_mpsl.c)
+zephyr_library_sources_ifndef(CONFIG_CLOCK_CONTROL_NRF clock_control/nrfx_clock_mpsl_split.c)
 
 zephyr_library_sources_ifdef(CONFIG_BT_CTLR_CRYPTO controller/crypto.c)
 
@@ -114,8 +119,13 @@ target_include_directories(zephyr_interface BEFORE INTERFACE
 zephyr_library_sources(
   mpsl/mpsl_init.c
   mpsl/multithreading_lock.c
-  clock_control/nrfx_clock_mpsl.c
 )
+
+# MPSL-backed nrfx clock shim. Zephyr <= 4.4 (legacy CONFIG_CLOCK_CONTROL_NRF
+# driver) consumes the monolithic nrfx_clock API; Zephyr >= 4.5's per-clock
+# drivers consume the split nrfx_clock_hfclk/lfclk API.
+zephyr_library_sources_ifdef(CONFIG_CLOCK_CONTROL_NRF clock_control/nrfx_clock_mpsl.c)
+zephyr_library_sources_ifndef(CONFIG_CLOCK_CONTROL_NRF clock_control/nrfx_clock_mpsl_split.c)
 
 set(MPSL_LIB_DIR ${NRFXLIB_DIR}/mpsl/lib/${SDC_SOC_FAMILY}/${SDC_FLOAT_ABI})
 set(MPSL_FEM_DIR ${NRFXLIB_DIR}/mpsl/fem/common/lib/${SDC_SOC_FAMILY}/${SDC_FLOAT_ABI})

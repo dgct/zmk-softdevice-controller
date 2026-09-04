@@ -23,14 +23,6 @@
 #include <nrfx.h>
 #include <hal/nrf_clock.h>
 
-/* nrfx >= 4.x: HFXO status via the domain query (nrf_clock_hf_is_running() is gone). */
-static inline bool hfxo_is_running(void)
-{
-	nrf_clock_hfclk_t src;
-
-	return nrf_clock_is_running(NRF_CLOCK, NRF_CLOCK_DOMAIN_HFCLK, &src) &&
-	       src == NRF_CLOCK_HFCLK_HIGH_ACCURACY;
-}
 #include "esb_glue.h"
 #include "esb_workarounds.h"
 
@@ -115,28 +107,47 @@ int esb_clocks_stop(void)
 
 #elif !defined(CONFIG_CLOCK_CONTROL_NRF2)
 
-/* Zephyr >= 4.5 per-clock nRF drivers on nRF52/53: the on/off manager getter
- * is gone; use the reference-counted HFXO request and wait for the crystal. */
+/* Zephyr >= 4.5 per-clock nRF drivers on nRF52/53: request the HFCLK device
+ * (routed through the MPSL-backed nrfx shim), waiting for the crystal. */
+static const struct device *const hfclk_dev = DEVICE_DT_GET(DT_NODELABEL(hfclk));
+
 int esb_clocks_start(void)
 {
-	nrf_clock_control_hfxo_request();
-	for (int i = 0; i < 2000; i++) {
-		if (hfxo_is_running()) {
-			esb_apply_nrf54l_20();
-			esb_apply_nrf54l_39();
-			LOG_DBG("HF clock started");
-			return 0;
-		}
-		k_busy_wait(1);
+	struct onoff_client cli;
+	int err;
+	int res;
+
+	if (!device_is_ready(hfclk_dev)) {
+		LOG_ERR("HFCLK device not ready");
+		return -ENODEV;
 	}
-	nrf_clock_control_hfxo_release();
-	LOG_ERR("HFXO did not start");
-	return -ETIMEDOUT;
+	sys_notify_init_spinwait(&cli.notify);
+	err = nrf_clock_control_request(hfclk_dev, NULL, &cli);
+	if (err < 0) {
+		LOG_ERR("Clock request failed: %d", err);
+		return err;
+	}
+	while ((err = sys_notify_fetch_result(&cli.notify, &res)) == -EAGAIN) {
+		k_yield();
+	}
+	if (err || res) {
+		LOG_ERR("Clock could not be started: %d/%d", err, res);
+		return err ? err : res;
+	}
+	esb_apply_nrf54l_20();
+	esb_apply_nrf54l_39();
+	LOG_DBG("HF clock started");
+	return 0;
 }
 
 int esb_clocks_stop(void)
 {
-	nrf_clock_control_hfxo_release();
+	int err = nrf_clock_control_release(hfclk_dev, NULL);
+
+	if (err < 0) {
+		LOG_ERR("Clock release failed: %d", err);
+		return err;
+	}
 	esb_revert_nrf54l_39();
 	esb_revert_nrf54l_20();
 	LOG_DBG("HF clock stopped");

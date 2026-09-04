@@ -33,15 +33,18 @@
 
 #if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
 #include "esb_ticker.h"
+#endif
 /* Forward declarations — avoid pulling in ull_esb.h which needs lll.h
- * (and lll.h has no include guards).
+ * (and lll.h has no include guards). Declared unconditionally: the
+ * IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT) call sites are compiled (then
+ * dead-stripped) even when the ticker is off, and GCC 14 rejects implicit
+ * declarations.
  */
 int ull_esb_start(void);
 int ull_esb_stop(void);
 void ull_esb_request_start(void);
 int ull_esb_reconfigure(uint32_t interval_us);
 uint32_t ull_esb_get_interval_us(void);
-#endif
 
 #include "esb_peripherals.h"
 #include "esb_ppi_api.h"

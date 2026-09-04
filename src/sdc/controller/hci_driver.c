@@ -6,6 +6,8 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/entropy.h>
+#include <stdlib.h>
+#include <string.h>
 #include <zephyr/drivers/bluetooth.h>
 #include <zephyr/bluetooth/controller.h>
 #include <zephyr/bluetooth/hci_vs.h>
@@ -34,6 +36,7 @@
 
 #include "multithreading_lock.h"
 #include "hci_internal.h"
+#include <sdc_asserts.h>
 #include "radio_nrf5_txp.h"
 #include "cs_antenna_switch.h"
 
@@ -341,15 +344,49 @@ void sdc_assertion_handler(const char *const file, const uint32_t line)
 }
 
 #else /* !IS_ENABLED(CONFIG_BT_CTLR_ASSERT_HANDLER) */
+
+#if defined(CONFIG_LOG)
+/* nrfxlib >= v3.4.0 ships include/sdc_asserts.h, a table of documented
+ * controller asserts. Decode (file_id, line) into its message so a crash
+ * capture says what the controller tripped on (ported from sdk-nrf main).
+ */
+static const char *sdc_get_assertion_message(const char *const file, const uint32_t line)
+{
+	uint32_t file_id = atoi(file);
+
+	for (uint32_t i = 0; i < ARRAY_SIZE(sdc_assert_messages); i++) {
+		if (sdc_assert_messages[i].file_id == file_id &&
+		    sdc_assert_messages[i].line == line) {
+			return sdc_assert_messages[i].assert_msg;
+		}
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_LOG */
+
 void sdc_assertion_handler(const char *const file, const uint32_t line)
 {
+	/* Keep the identifiers in volatile locals so they survive in a core
+	 * dump / debugger even when the message path is compiled out. */
+	volatile char assert_file_id[11] = { 0 };
+	volatile uint32_t assert_line = line;
+
+	strncpy((char *)assert_file_id, file, sizeof(assert_file_id) - 1);
+
 #if defined(CONFIG_ASSERT) && defined(CONFIG_ASSERT_VERBOSE) && !defined(CONFIG_ASSERT_NO_MSG_INFO)
-	__ASSERT(false, "SoftDevice Controller ASSERT: %s, %d\n", file, line);
+	__ASSERT(false, "SoftDevice Controller ASSERT: %s, 0x%04x\n",
+		 (char *)assert_file_id, assert_line);
 #elif defined(CONFIG_LOG)
-	LOG_ERR("SoftDevice Controller ASSERT: %s, %d", file, line);
+	LOG_ERR("SoftDevice Controller ASSERT: %s, 0x%04x", (char *)assert_file_id, assert_line);
+	const char *failure_reason_msg =
+		sdc_get_assertion_message((char *)assert_file_id, assert_line);
+	if (failure_reason_msg) {
+		LOG_ERR("ASSERT REASON: %s", failure_reason_msg);
+	}
 	k_oops();
 #elif defined(CONFIG_PRINTK)
-	printk("SoftDevice Controller ASSERT: %s, %d\n", file, line);
+	printk("SoftDevice Controller ASSERT: %s, 0x%04x\n", (char *)assert_file_id, assert_line);
 	printk("\n");
 	k_oops();
 #else

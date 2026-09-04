@@ -2581,7 +2581,7 @@ int esb_init(const struct esb_config *config)
 
 		esb_ticker_event_done_flag = false;
 		esb_state = ESB_STATE_IDLE;
-		LOG_INF("ESB init: ticker mode, timer=%d", ESB_NRF_TIMER_INSTANCE);
+		LOG_INF("ESB init: ticker mode, timer=%p", (void *)ESB_NRF_TIMER_INSTANCE);
 
 	}
 #endif /* CONFIG_ESB_TICKER_TIMESLOT */

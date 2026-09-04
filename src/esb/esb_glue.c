@@ -22,6 +22,15 @@
 #include <zephyr/logging/log.h>
 #include <nrfx.h>
 #include <hal/nrf_clock.h>
+
+/* nrfx >= 4.x: HFXO status via the domain query (nrf_clock_hf_is_running() is gone). */
+static inline bool hfxo_is_running(void)
+{
+	nrf_clock_hfclk_t src;
+
+	return nrf_clock_is_running(NRF_CLOCK, NRF_CLOCK_DOMAIN_HFCLK, &src) &&
+	       src == NRF_CLOCK_HFCLK_HIGH_ACCURACY;
+}
 #include "esb_glue.h"
 #include "esb_workarounds.h"
 
@@ -112,7 +121,7 @@ int esb_clocks_start(void)
 {
 	nrf_clock_control_hfxo_request();
 	for (int i = 0; i < 2000; i++) {
-		if (nrf_clock_hf_is_running(NRF_CLOCK, NRF_CLOCK_HFCLK_HIGH_ACCURACY)) {
+		if (hfxo_is_running()) {
 			esb_apply_nrf54l_20();
 			esb_apply_nrf54l_39();
 			LOG_DBG("HF clock started");

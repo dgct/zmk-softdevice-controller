@@ -404,7 +404,12 @@ static int32_t mpsl_lib_init_internal(void)
 	/* TODO: Clock config should be adapted in the future to new architecture. */
 #if !defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
 	clock_cfg.source = m_config_clock_source_get();
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
 	clock_cfg.accuracy_ppm = CONFIG_CLOCK_CONTROL_NRF_ACCURACY;
+#else
+	/* Zephyr >= 4.5: accuracy is a DT property of the lfclk node. */
+	clock_cfg.accuracy_ppm = DT_PROP(CLOCK_NODE_LFCLK, k32src_accuracy_ppm);
+#endif
 	clock_cfg.skip_wait_lfclk_started =
 		IS_ENABLED(CONFIG_SYSTEM_CLOCK_NO_WAIT);
 

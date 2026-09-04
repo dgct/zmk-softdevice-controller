@@ -200,14 +200,91 @@ config ESB_TICKER_DIAG
 	  esb_ticker_get_diag() (used by ZMK_ESB_STATS).
 
 config ESB_TICKER_SLOT_US
-	int "ESB ticker slot duration in microseconds"
+	int "ESB ticker slot duration in microseconds (when not automatic)"
 	default 2500
 	range 500 10000
-	depends on ESB_TICKER_TIMESLOT
+	depends on ESB_TICKER_TIMESLOT && !ESB_TICKER_SLOT_AUTO
 	help
 	  Duration of each ESB radio slot. Must be shorter than the
 	  ticker interval to leave time for BLE events. The slot
 	  includes radio ramp-up, RX listen, and ACK transmission.
+
+config ESB_TICKER_SLOT_AUTO
+	bool "Size the ESB ticker slot from the bitrate and payload length"
+	default y
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  Slot = RX ramp-up + ESB_TICKER_SLOT_GUARD_US + on-air time of the
+	  longest frame (ESB_MAX_PAYLOAD_LENGTH at the configured bitrate).
+	  An ACK that is in flight when the slot expires is allowed to finish
+	  before the slot closes, so the ACK is not part of the budget.
+
+config ESB_TICKER_SLOT_GUARD_US
+	int "Allowance in the automatic slot for the PTX aiming lead and jitter (us)"
+	default 300
+	range 50 2000
+	depends on ESB_TICKER_SLOT_AUTO
+	help
+	  The phase-locked PTX aims its frame ZMK_ESB_TX_LEAD_US after the
+	  window opens; this guard must cover that lead plus the timing
+	  jitter of both sides (RTC tick 30.5 us, IRQ latency).
+
+config ESB_TICKER_SLOT_RESERVE
+	bool "Reserve the ESB slot in the ticker scheduler"
+	default n
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  When set, the ESB ticker node reserves its slot like a BLE role does,
+	  so the scheduler resolves collisions between ESB and BLE nodes (and
+	  may skip ESB expiries that overlap a BLE reservation). When unset the
+	  node is slot-less: it always expires and yields to any BLE event at
+	  the LLL level instead. Slot-less is the coexistence policy this
+	  driver is designed around.
+
+config ESB_TICKER_START_DELAY_MS
+	int "Delay before the ESB ticker starts once its preconditions hold (ms)"
+	default 0
+	range 0 10000
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  The ticker starts as soon as both esb_start_rx()/esb_start_tx() and
+	  the controller's ull_user_init() have run. A delay only helps when a
+	  console must come up first to see the earliest log lines.
+
+config ESB_TICKER_ANCHOR_BLE
+	bool "Align the ESB ticker to the BLE peripheral connection anchor"
+	default y
+	depends on ESB_TICKER_TIMESLOT && BT_PERIPHERAL
+	help
+	  On every ESB ticker expiry compare its phase with the host link's
+	  connection ticker (peripheral role) and apply a drift correction so
+	  the ESB slot always starts ESB_TICKER_ANCHOR_OFFSET_US after the
+	  connection ticker expiry. With an ESB period that divides the
+	  connection interval, the ESB slot then never overlaps the BLE
+	  connection event. Without a peripheral connection the ticker
+	  free-runs.
+
+config ESB_TICKER_ANCHOR_OFFSET_US
+	int "ESB ticker expiry offset after the connection ticker expiry (us)"
+	default 2350
+	range 0 20000
+	depends on ESB_TICKER_ANCHOR_BLE
+	help
+	  The connection ticker expires EVENT_OVERHEAD_XTAL_US + EVENT_OVERHEAD_
+	  START_US (1500 + 275 us on nRF52) before the on-air anchor point; a
+	  typical peripheral connection event with one PDU pair lasts ~500 us
+	  from the anchor. 2350 = 1775 + 500 + ~75 us guard. Raise it if the
+	  host link carries several PDUs per event; lower it towards 1900 to
+	  squeeze a 2 ms connection interval.
+
+config ESB_TICKER_ANCHOR_TOLERANCE_US
+	int "Phase error tolerated before a drift correction is applied (us)"
+	default 61
+	range 31 2000
+	depends on ESB_TICKER_ANCHOR_BLE
+	help
+	  Two RTC ticks by default. Corrections are applied through
+	  ticker_update() drift, never by restarting the ticker.
 
 config ESB_NEVER_DISABLE_TX
 	select EXPERIMENTAL

@@ -80,6 +80,14 @@ void esb_ticker_slot_close(void);
 bool esb_ticker_is_active(void);
 
 /**
+ * @brief Slot length for the ticker node in microseconds.
+ *
+ * Automatic (bitrate and max payload) with CONFIG_ESB_TICKER_SLOT_AUTO,
+ * otherwise CONFIG_ESB_TICKER_SLOT_US. Also declared in esb.h.
+ */
+uint32_t esb_ticker_slot_us_get(void);
+
+/**
  * @brief Check if the current event completed (slot closed or action done).
  *
  * @return true if the ESB event has ended and cleanup can proceed.
@@ -96,6 +104,10 @@ struct esb_ticker_diag {
 	uint32_t abort_pipeline; /* prepares cancelled before starting */
 	uint32_t errors;         /* event_start failures */
 	uint32_t interval_us;    /* current ticker period */
+	uint32_t slot_us;        /* current slot length */
+	uint32_t anchor_updates; /* drift corrections applied to follow the BLE anchor */
+	int32_t anchor_err_us;   /* last measured phase error vs the BLE anchor (+ = late) */
+	bool anchor_locked;      /* a peripheral-role connection is being tracked */
 	bool running;
 };
 void esb_ticker_get_diag(struct esb_ticker_diag *out);

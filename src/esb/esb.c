@@ -45,6 +45,7 @@ int ull_esb_stop(void);
 void ull_esb_request_start(void);
 int ull_esb_reconfigure(uint32_t interval_us);
 uint32_t ull_esb_get_interval_us(void);
+uint32_t ull_esb_get_skip(void);
 
 #include "esb_peripherals.h"
 #include "esb_ppi_api.h"
@@ -295,6 +296,7 @@ static struct esb_address esb_addr = {
 static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
+static esb_ack_trailer_cb_t ack_trailer_cb;
 static struct esb_payload *current_payload;
 
 #if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
@@ -1391,20 +1393,44 @@ static void clear_ts_peripherals(void)
 	esb_ppi_deinit();
 }
 
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+static void on_radio_disabled_ticker_close(void);
+
+/* Close the ticker slot: clear shorts BEFORE triggering DISABLE (the hardware
+ * SHORT DISABLED->TXEN/RXEN fires atomically with the DISABLED event, so
+ * clearing after DISABLE is too late and causes a ghost burst on stale buffer
+ * contents), then let the DISABLED ISR run on_radio_disabled_ticker_close.
+ * Callable from the slot timer ISR and from DISABLED handlers whose short has
+ * just re-armed the radio (it is then in TXRU/RXRU and DISABLE completes).
+ */
+static void ticker_close_now(void)
+{
+	nrf_radio_shorts_set(NRF_RADIO, 0);
+	on_radio_disabled = on_radio_disabled_ticker_close;
+	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+}
+#endif
+
 static void esb_timer_handler(nrf_timer_event_t event_type, void *context)
 {
 #if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
 	if (event_type == NRF_TIMER_EVENT_COMPARE0) {
-		/* Ticker slot duration expired. Clear shorts BEFORE triggering
-		 * DISABLE — the hardware SHORT DISABLED→TXEN fires atomically
-		 * with the DISABLED event, so clearing after DISABLE is too late
-		 * and causes a ghost TX burst on stale buffer contents.
-		 */
+		/* Ticker slot duration expired. */
 		nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
-		nrf_radio_shorts_set(NRF_RADIO, 0);
 		ts_next_action = TS_NEXT_ACTION_CLOSE;
-		on_radio_disabled = on_radio_disabled_ticker_close;
-		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+
+		/* A frame being received (address matched) or an ACK in flight
+		 * is allowed to finish: its DISABLED handler sees
+		 * TS_NEXT_ACTION_CLOSE and closes the slot then. Everything else
+		 * is cut now.
+		 */
+		bool in_flight = (esb_state == ESB_STATE_PRX_SEND_ACK) ||
+				 ((esb_state == ESB_STATE_PRX) &&
+				  nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS));
+
+		if (!in_flight) {
+			ticker_close_now();
+		}
 	}
 #endif
 
@@ -2067,6 +2093,16 @@ static void start_rx_listening(void)
 
 static void clear_events_restart_rx(void)
 {
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	if (ts_next_action == TS_NEXT_ACTION_CLOSE) {
+		/* Slot expired while this frame was in the air: close instead
+		 * of listening again. The DISABLED->TXEN short has re-armed the
+		 * radio, so DISABLE completes through the ISR.
+		 */
+		ticker_close_now();
+		return;
+	}
+#endif
 	esb_fem_lna_reset();
 	esb_ppi_for_txrx_clear(true, false);
 
@@ -2078,6 +2114,10 @@ static void clear_events_restart_rx(void)
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
 
+	/* A stale ADDRESS event would look like a frame in flight to the
+	 * ticker slot-close logic; the next frame sets it afresh.
+	 */
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
 
@@ -2105,6 +2145,7 @@ static void prepare_ack_pdu_dpl(bool retransmit_payload, struct pipe_info *pipe_
 {
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+	uint8_t ack_len = 0;
 
 	uint32_t pipe = nrf_radio_rxmatch_get(NRF_RADIO);
 
@@ -2131,17 +2172,26 @@ static void prepare_ack_pdu_dpl(bool retransmit_payload, struct pipe_info *pipe_
 		if (current_payload != 0) {
 			pipe_info->ack_payload = true;
 
-			tx_pdu->type.dpl_pdu.length = current_payload->length;
-			memcpy(tx_pdu->data, current_payload->data, current_payload->length);
+			ack_len = current_payload->length;
+			memcpy(tx_pdu->data, current_payload->data, ack_len);
 		} else {
 			pipe_info->ack_payload = false;
-			tx_pdu->type.dpl_pdu.length = 0;
 		}
 	} else {
 		pipe_info->ack_payload = false;
-		tx_pdu->type.dpl_pdu.length = 0;
 	}
 
+	/* Transport trailer (live timing stamp) after the staged payload, when
+	 * there is room for it. Skipped silently otherwise: the transport
+	 * keeps its replies short enough that this only happens on oversize
+	 * payloads it never stages.
+	 */
+	if (ack_trailer_cb != NULL && ack_len < CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+		ack_len += ack_trailer_cb(tx_pdu->data + ack_len,
+					  (uint8_t)(CONFIG_ESB_MAX_PAYLOAD_LENGTH - ack_len));
+	}
+
+	tx_pdu->type.dpl_pdu.length = ack_len;
 	tx_pdu->type.dpl_pdu.pid = rx_pdu->type.dpl_pdu.pid;
 	tx_pdu->type.dpl_pdu.ack = rx_pdu->type.dpl_pdu.ack;
 }
@@ -2241,12 +2291,26 @@ static void on_radio_disabled_rx(void)
 
 static void on_radio_disabled_rx_send_ack(void)
 {
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	if (ts_next_action == TS_NEXT_ACTION_CLOSE) {
+		/* The ACK that ran past the slot end has been sent. */
+		esb_fem_for_ack_rx();
+		ticker_close_now();
+		return;
+	}
+#endif
 	esb_fem_for_ack_rx();
 
 	if (esb_cfg.protocol == ESB_PROTOCOL_ESB) {
 		update_rf_payload_format_esb(esb_cfg.payload_length);
 	}
 
+	/* The ACK's own ADDRESS event (and the received frame's) must not read
+	 * as a frame in flight to the ticker slot-close logic. RX has just been
+	 * re-armed by the DISABLED->RXEN short; a new frame's address cannot
+	 * arrive before the ramp-up completes.
+	 */
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
 	if (fast_switching) {
 		nrf_radio_shorts_set(NRF_RADIO,
@@ -2334,6 +2398,27 @@ int esb_set_ticker_interval_us(uint32_t interval_us)
 uint32_t esb_get_ticker_interval_us(void)
 {
 	return ull_esb_get_interval_us();
+}
+
+uint32_t esb_get_ticker_skip(void)
+{
+	return ull_esb_get_skip();
+}
+
+uint32_t esb_ticker_slot_us_get(void)
+{
+#if IS_ENABLED(CONFIG_ESB_TICKER_SLOT_AUTO)
+	/* RX ramp-up, then the PTX aiming lead and both sides' timing jitter,
+	 * then the longest frame. The ACK is not budgeted: an ACK in flight
+	 * when the slot expires finishes before the slot closes.
+	 */
+	uint32_t ramp = esb_cfg.use_fast_ramp_up ? TX_FAST_RAMP_UP_TIME_US : RX_RAMP_UP_TIME_US;
+	uint32_t frame = esb_frame_airtime_us(esb_cfg.bitrate, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+
+	return ramp + CONFIG_ESB_TICKER_SLOT_GUARD_US + frame + ADDR_EVENT_LATENCY_US;
+#else
+	return CONFIG_ESB_TICKER_SLOT_US;
+#endif
 }
 #endif /* CONFIG_ESB_TICKER_TIMESLOT */
 
@@ -3083,6 +3168,16 @@ int esb_flush_tx(void)
 	}
 
 	return 0;
+}
+
+void esb_set_ack_trailer_cb(esb_ack_trailer_cb_t cb)
+{
+	ack_trailer_cb = cb;
+}
+
+uint32_t esb_tx_fifo_count(void)
+{
+	return (uint32_t)atomic_get(&tx_fifo.count);
 }
 
 int esb_pop_tx(void)

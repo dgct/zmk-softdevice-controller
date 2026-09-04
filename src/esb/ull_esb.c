@@ -25,6 +25,26 @@
 
 #include "ull_internal.h"
 
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+/* Same include order as ull_conn.c: the connection context headers are not
+ * self-contained.
+ */
+#include <zephyr/bluetooth/hci_types.h>
+#include "hal/cpu.h"
+#include "hal/ccm.h"
+#include "util/mem.h"
+#include "util/mfifo.h"
+#include "util/dbuf.h"
+#include "pdu_df.h"
+#include "lll/pdu_vendor.h"
+#include "pdu.h"
+#include "lll/lll_df_types.h"
+#include "lll_conn.h"
+#include "ll_sw/ull_tx_queue.h"
+#include "ull_conn_types.h"
+#include "ull_conn_internal.h"
+#endif
+
 #include "ull_esb.h"
 #include "lll_esb.h"
 #include "esb_ticker.h"
@@ -43,6 +63,7 @@ static bool esb_ticker_running;
  * interval), so reconfigure defers a stop+start to thread context.
  */
 static uint32_t esb_ticker_interval_us = CONFIG_ESB_TICKER_INTERVAL_US;
+static uint32_t esb_ticker_slot_us;
 static atomic_t esb_pending_interval_us;
 
 /* Mayfly for dispatching LLL prepare from ULL context */
@@ -79,6 +100,113 @@ static void esb_diag_work_handler(struct k_work *work)
 	k_work_schedule(&esb_diag_work, K_SECONDS(2));
 }
 
+static void ticker_op_cb(uint32_t status, void *param);
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+/* ---- BLE connection anchor tracking ----
+ *
+ * The host link (peripheral role) is scheduled by its own connection ticker,
+ * which the controller keeps aligned to the central's anchor through drift
+ * updates every connection event. The ESB ticker is a free-running periodic
+ * node, so left alone its phase relative to the BLE event is arbitrary and
+ * wanders with clock drift between the host and this board. On every ESB
+ * expiry we therefore measure the phase error against the connection
+ * ticker's latest expiry (conn->llcp.prep.ticks_at_expire, written in
+ * ULL_HIGH by ull_conn_llcp() before every BLE event) and apply the same kind
+ * of ticker_update() drift correction the connection uses. Both run in
+ * ULL_HIGH, so the read is race-free.
+ *
+ * Target: ESB expiry = conn expiry + CONFIG_ESB_TICKER_ANCHOR_OFFSET_US
+ * (modulo the ESB period). With an ESB period that divides the connection
+ * interval the ESB slot then lands at a fixed, BLE-free phase every time.
+ */
+static struct {
+	uint32_t updates;      /* drift corrections applied */
+	int32_t last_err_us;   /* last measured phase error (+ = ESB late) */
+	uint8_t settle;        /* expiries to skip after a correction */
+	bool locked;           /* a peripheral connection was found */
+} anchor;
+
+static struct ll_conn *anchor_conn_find(void)
+{
+	for (uint16_t h = 0U; h < CONFIG_BT_MAX_CONN; h++) {
+		struct ll_conn *conn = ll_connected_get(h);
+
+		if (conn && (conn->lll.role == BT_HCI_ROLE_PERIPHERAL)) {
+			return conn;
+		}
+	}
+	return NULL;
+}
+
+/* ULL_HIGH context, once per ESB ticker expiry. */
+static void anchor_track(uint32_t ticks_at_expire)
+{
+	struct ll_conn *conn = anchor_conn_find();
+	uint32_t period;
+	uint32_t target;
+	uint32_t diff;
+	int32_t err;
+
+	anchor.locked = (conn != NULL);
+	if (!conn) {
+		return;
+	}
+	if (anchor.settle) {
+		anchor.settle--;
+		return;
+	}
+
+	period = HAL_TICKER_US_TO_TICKS(esb_ticker_interval_us);
+	if (period == 0U) {
+		return;
+	}
+
+	target = conn->llcp.prep.ticks_at_expire +
+		 HAL_TICKER_US_TO_TICKS(CONFIG_ESB_TICKER_ANCHOR_OFFSET_US);
+
+	/* Signed distance from target to our expiry on the 24-bit RTC. */
+	diff = ticker_ticks_diff_get(ticks_at_expire, target);
+	if (diff & BIT(23)) {
+		err = (int32_t)diff - (int32_t)BIT(24);
+	} else {
+		err = (int32_t)diff;
+	}
+
+	/* Fold into (-period/2, period/2]: + = we expire late, - = early. */
+	err %= (int32_t)period;
+	if (err < 0) {
+		err += (int32_t)period;
+	}
+	if (err > (int32_t)period / 2) {
+		err -= (int32_t)period;
+	}
+
+	anchor.last_err_us = (err < 0) ? -(int32_t)HAL_TICKER_TICKS_TO_US((uint32_t)-err)
+				       : (int32_t)HAL_TICKER_TICKS_TO_US((uint32_t)err);
+
+	if ((uint32_t)((err < 0) ? -err : err) <
+	    HAL_TICKER_US_TO_TICKS(CONFIG_ESB_TICKER_ANCHOR_TOLERANCE_US)) {
+		return;
+	}
+
+	uint32_t ret = ticker_update(TICKER_INSTANCE_ID_CTLR,
+				     TICKER_USER_ID_ULL_HIGH,
+				     TICKER_ID_USER_BASE,
+				     (err < 0) ? (uint32_t)-err : 0U,   /* delay: we are early */
+				     (err > 0) ? (uint32_t)err : 0U,    /* advance: we are late */
+				     0U, 0U,                             /* slot unchanged */
+				     0U,                                 /* lazy unchanged */
+				     0U,                                 /* force */
+				     ticker_op_cb, NULL);
+
+	if ((ret == TICKER_STATUS_SUCCESS) || (ret == TICKER_STATUS_BUSY)) {
+		anchor.updates++;
+		anchor.settle = 2U;
+	}
+}
+#endif /* CONFIG_ESB_TICKER_ANCHOR_BLE */
+
 void esb_ticker_get_diag(struct esb_ticker_diag *out)
 {
 	out->prepare = esb_diag_prep_count;
@@ -88,7 +216,17 @@ void esb_ticker_get_diag(struct esb_ticker_diag *out)
 	out->abort_pipeline = esb_diag_abort_pipeline_count;
 	out->errors = esb_diag_err_count;
 	out->interval_us = esb_ticker_interval_us;
+	out->slot_us = esb_ticker_slot_us;
 	out->running = esb_ticker_running;
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+	out->anchor_updates = anchor.updates;
+	out->anchor_err_us = anchor.last_err_us;
+	out->anchor_locked = anchor.locked;
+#else
+	out->anchor_updates = 0U;
+	out->anchor_err_us = 0;
+	out->anchor_locked = false;
+#endif
 }
 
 static void deferred_ticker_start_handler(struct k_work *work);
@@ -97,7 +235,6 @@ static K_WORK_DELAYABLE_DEFINE(deferred_ticker_start, deferred_ticker_start_hand
 static void ull_esb_ticker_cb(uint32_t ticks_at_expire, uint32_t ticks_drift,
 			      uint32_t remainder, uint16_t lazy, uint8_t force,
 			      void *param);
-static void ticker_op_cb(uint32_t status, void *param);
 
 /**
  * @brief Deferred ticker start work handler.
@@ -150,18 +287,18 @@ int ull_esb_init(void)
 
 	LOG_INF("ULL ESB: initialized");
 
-	/* Submit the deferred start with delay so USB CDC logging is ready.
-	 * If ESB is already pending, the work handler will start the ticker.
-	 * If not, esb_start_rx() will re-submit when it runs.
+	/* Submit the deferred start (optionally delayed, see
+	 * CONFIG_ESB_TICKER_START_DELAY_MS). If ESB is already pending, the
+	 * work handler starts the ticker; if not, esb_start_rx() re-submits.
 	 */
-	k_work_schedule(&deferred_ticker_start, K_SECONDS(3));
+	k_work_schedule(&deferred_ticker_start, K_MSEC(CONFIG_ESB_TICKER_START_DELAY_MS));
 
 	return 0;
 }
 
 void ull_esb_request_start(void)
 {
-	k_work_schedule(&deferred_ticker_start, K_SECONDS(3));
+	k_work_schedule(&deferred_ticker_start, K_MSEC(CONFIG_ESB_TICKER_START_DELAY_MS));
 }
 
 /**
@@ -226,6 +363,21 @@ uint32_t ull_esb_get_interval_us(void)
 	return esb_ticker_interval_us;
 }
 
+uint32_t ull_esb_get_slot_us(void)
+{
+	return esb_ticker_slot_us;
+}
+
+/* Listen tier: windows skipped between two the node listens in. Set by the
+ * ticker lazy update (Stage 3); 0 = every window.
+ */
+static uint32_t esb_ticker_skip;
+
+uint32_t ull_esb_get_skip(void)
+{
+	return esb_ticker_skip;
+}
+
 int ull_esb_start(void)
 {
 	uint32_t ticks_anchor;
@@ -238,13 +390,20 @@ int ull_esb_start(void)
 		return -EALREADY;
 	}
 
+	esb_ticker_slot_us = esb_ticker_slot_us_get();
+
 	ticks_periodic = HAL_TICKER_US_TO_TICKS(esb_ticker_interval_us);
 	remainder_periodic = HAL_TICKER_REMAINDER(esb_ticker_interval_us);
-	ticks_slot = HAL_TICKER_US_TO_TICKS(CONFIG_ESB_TICKER_SLOT_US);
+	ticks_slot = HAL_TICKER_US_TO_TICKS(esb_ticker_slot_us);
 	ticks_anchor = ticker_ticks_now_get();
 
-	/* Reserve the slot in the ULL header */
+	/* Record the slot in the ULL header (used for diagnostics); the ticker
+	 * reservation itself is optional, see CONFIG_ESB_TICKER_SLOT_RESERVE.
+	 */
 	esb_ctx.ull.ticks_slot = ticks_slot;
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+	anchor.settle = 0U;
+#endif
 
 	ret = ticker_start(TICKER_INSTANCE_ID_CTLR,
 			   TICKER_USER_ID_THREAD,
@@ -254,7 +413,7 @@ int ull_esb_start(void)
 			   ticks_periodic,
 			   remainder_periodic,
 			   TICKER_NULL_LAZY,
-			   ticks_slot,
+			   IS_ENABLED(CONFIG_ESB_TICKER_SLOT_RESERVE) ? ticks_slot : 0U,
 			   ull_esb_ticker_cb,
 			   &esb_ctx,
 			   ticker_op_cb,
@@ -267,8 +426,9 @@ int ull_esb_start(void)
 
 	esb_ticker_running = true;
 
-	LOG_INF("ULL ESB: ticker started (interval=%u us, slot=%u us)",
-		esb_ticker_interval_us, CONFIG_ESB_TICKER_SLOT_US);
+	LOG_INF("ULL ESB: ticker started (interval=%u us, slot=%u us, %s)",
+		esb_ticker_interval_us, esb_ticker_slot_us,
+		IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE) ? "BLE-anchored" : "free-running");
 
 	return 0;
 }
@@ -339,6 +499,10 @@ static void ull_esb_ticker_cb(uint32_t ticks_at_expire, uint32_t ticks_drift,
 	if (!esb_ticker_is_active()) {
 		return;
 	}
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+	anchor_track(ticks_at_expire);
+#endif
 
 	/* Increment prepare reference count */
 	ull_ref_inc(&ctx->ull);

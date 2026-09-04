@@ -438,6 +438,42 @@ int esb_start_tx(void);
  */
 uint32_t esb_get_slot_elapsed_us(void);
 
+/** @brief Fast radio ramp-up time (TXEN/RXEN to READY) in microseconds. */
+#define ESB_RAMP_UP_FAST_US 40
+
+/** @brief On-air time of one ESB DPL frame in microseconds.
+ *
+ *  Preamble (8 bits), 5-byte address, 9-bit packet control field, payload and
+ *  16-bit CRC at the given bitrate (4 Mbps is not available on nRF52 and is
+ *  treated as 2 Mbps).
+ */
+static inline uint32_t esb_frame_airtime_us(enum esb_bitrate bitrate, uint32_t payload_len)
+{
+	uint32_t bits = 8U + 40U + 9U + (8U * payload_len) + 16U;
+
+	if (bitrate == ESB_BITRATE_2MBPS) {
+		return (bits + 1U) / 2U;
+	}
+	return bits;
+}
+
+/** @brief ACK trailer hook (PRX).
+ *
+ *  Called from the radio ISR while every ACK PDU is being prepared, after the
+ *  staged ACK payload (if any) has been copied. The callback may append up to
+ *  @p max_len bytes at @p buf and returns the number of bytes it appended
+ *  (0 for none). It runs while the radio is already ramping up to transmit
+ *  the ACK, so it must be short and register-level: no logging, no locks.
+ *  The transport uses it to stamp every ACK with live RX-window timing.
+ */
+typedef uint8_t (*esb_ack_trailer_cb_t)(uint8_t *buf, uint8_t max_len);
+
+/** @brief Install (or clear with NULL) the ACK trailer hook. */
+void esb_set_ack_trailer_cb(esb_ack_trailer_cb_t cb);
+
+/** @brief Number of payloads waiting in the TX FIFO. */
+uint32_t esb_tx_fifo_count(void);
+
 /** @brief Start receiving data.
  *
  * @retval 0 If successful.
@@ -661,6 +697,20 @@ int esb_set_ticker_interval_us(uint32_t interval_us);
 
 /** @brief Get the current ESB ticker period in microseconds (ticker mode). */
 uint32_t esb_get_ticker_interval_us(void);
+
+/** @brief Windows the ticker node currently skips between two it listens in.
+ *
+ *  0 = the radio listens in every ESB period; n = every (n + 1)th period
+ *  (idle listen tiers). Reported to the peripheral in every ACK trailer.
+ */
+uint32_t esb_get_ticker_skip(void);
+
+/** @brief Duration of one ESB ticker slot in microseconds.
+ *
+ *  Computed from the bitrate and ESB_MAX_PAYLOAD_LENGTH when
+ *  CONFIG_ESB_TICKER_SLOT_AUTO is set, otherwise CONFIG_ESB_TICKER_SLOT_US.
+ */
+uint32_t esb_ticker_slot_us_get(void);
 #endif
 
 /** @} */

@@ -50,6 +50,12 @@ int ull_esb_init(void);
  */
 int ull_esb_start(void);
 
+/** @brief Current ESB ticker slot length in microseconds (valid once started). */
+uint32_t ull_esb_get_slot_us(void);
+
+/** @brief Windows skipped between listens (0 = every window). */
+uint32_t ull_esb_get_skip(void);
+
 /**
  * @brief Request deferred ESB ticker start.
  *

@@ -154,7 +154,7 @@ static int esb_lll_prepare_cb(struct lll_prepare_param *p)
 	 * lll_peripheral.c: it starts real radio work and the ISR chain
 	 * will call esb_lll_isr_done → lll_done(NULL) when the slot closes.
 	 */
-	ret = esb_ticker_event_start(CONFIG_ESB_TICKER_SLOT_US);
+	ret = esb_ticker_event_start(ull_esb_get_slot_us());
 	if (ret) {
 		esb_diag_err_count++;
 		LOG_WRN("LLL ESB: event_start failed (%d), releasing slot", ret);

@@ -12,6 +12,7 @@
 #define ESB_TICKER_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,6 +86,19 @@ bool esb_ticker_is_active(void);
  */
 bool esb_ticker_event_is_done(void);
 void esb_ticker_mark_idle(void);
+
+/** Snapshot of the ticker node's diagnostic counters (see ull_esb.c). */
+struct esb_ticker_diag {
+	uint32_t prepare;        /* LLL prepare callbacks (slots that started) */
+	uint32_t done;           /* slots that completed normally */
+	uint32_t deferred;       /* prepares queued behind an active BLE event */
+	uint32_t abort_active;   /* slots aborted while the radio was running */
+	uint32_t abort_pipeline; /* prepares cancelled before starting */
+	uint32_t errors;         /* event_start failures */
+	uint32_t interval_us;    /* current ticker period */
+	bool running;
+};
+void esb_ticker_get_diag(struct esb_ticker_diag *out);
 
 #ifdef __cplusplus
 }

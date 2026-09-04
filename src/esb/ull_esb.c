@@ -79,6 +79,18 @@ static void esb_diag_work_handler(struct k_work *work)
 	k_work_schedule(&esb_diag_work, K_SECONDS(2));
 }
 
+void esb_ticker_get_diag(struct esb_ticker_diag *out)
+{
+	out->prepare = esb_diag_prep_count;
+	out->done = esb_diag_done_count;
+	out->deferred = esb_diag_defer_count;
+	out->abort_active = esb_diag_abort_active_count;
+	out->abort_pipeline = esb_diag_abort_pipeline_count;
+	out->errors = esb_diag_err_count;
+	out->interval_us = esb_ticker_interval_us;
+	out->running = esb_ticker_running;
+}
+
 static void deferred_ticker_start_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(deferred_ticker_start, deferred_ticker_start_handler);
 
@@ -118,7 +130,7 @@ static void deferred_ticker_start_handler(struct k_work *work)
 	int err = ull_esb_start();
 	if (err && err != -EALREADY) {
 		LOG_ERR("ULL ESB: deferred ticker start failed (%d)", err);
-	} else {
+	} else if (IS_ENABLED(CONFIG_ESB_TICKER_DIAG)) {
 		/* Start diagnostic reporting from thread context */
 		k_work_schedule(&esb_diag_work, K_SECONDS(2));
 	}

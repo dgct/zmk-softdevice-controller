@@ -425,6 +425,14 @@ static mpsl_timeslot_signal_return_param_t *ts_callback(mpsl_timeslot_session_id
 static volatile bool esb_ticker_event_done_flag;
 #endif /* CONFIG_ESB_TICKER_TIMESLOT */
 
+/* Frames received with a bad CRC (dropped in PTX/PRX, delivered in monitor mode). */
+static uint32_t rx_crc_errors;
+
+uint32_t esb_get_rx_crc_errors(void)
+{
+	return rx_crc_errors;
+}
+
 /* These function pointers are changed dynamically, depending on protocol
  * configuration and state. Note that they will be 0 initialized.
  */
@@ -1339,6 +1347,7 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 	rx_fifo.payload[rx_fifo.back]->pipe = pipe;
 	rx_fifo.payload[rx_fifo.back]->rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	rx_fifo.payload[rx_fifo.back]->pid = pid;
+	rx_fifo.payload[rx_fifo.back]->crc_ok = nrf_radio_crc_status_check(NRF_RADIO) ? 1 : 0;
 	rx_fifo.payload[rx_fifo.back]->noack = !rx_pdu->type.dpl_pdu.ack;
 
 	if (++rx_fifo.back >= CONFIG_ESB_RX_FIFO_SIZE) {
@@ -2146,6 +2155,7 @@ static void on_radio_disabled_rx(void)
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 
 	if (!nrf_radio_crc_status_check(NRF_RADIO)) {
+		rx_crc_errors++;
 		clear_events_restart_rx();
 		return;
 	}
@@ -2256,6 +2266,9 @@ static void on_radio_end_monitor(void)
 	struct pipe_info pipe;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
+	if (!nrf_radio_crc_status_check(NRF_RADIO)) {
+		rx_crc_errors++;
+	}
 	pipe.pid = rx_pdu->type.dpl_pdu.pid;
 	if (rx_fifo_push_rfbuf(nrf_radio_rxmatch_get(NRF_RADIO), pipe.pid)) {
 		atomic_set_bit(&interrupt_flags, ESB_EVENT_RX_RECEIVED);
@@ -2961,6 +2974,7 @@ int esb_read_rx_payload(struct esb_payload *payload)
 	payload->pipe = rx_fifo.payload[rx_fifo.front]->pipe;
 	payload->rssi = rx_fifo.payload[rx_fifo.front]->rssi;
 	payload->pid = rx_fifo.payload[rx_fifo.front]->pid;
+	payload->crc_ok = rx_fifo.payload[rx_fifo.front]->crc_ok;
 	payload->noack = rx_fifo.payload[rx_fifo.front]->noack;
 	memcpy(payload->data, rx_fifo.payload[rx_fifo.front]->data,
 	       payload->length);

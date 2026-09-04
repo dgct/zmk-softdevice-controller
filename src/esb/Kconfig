@@ -191,6 +191,14 @@ config ESB_TICKER_INTERVAL_US
 	  ESB latency but reduce BLE throughput. 5000 (5ms) matches the
 	  default MPSL timeslot interval.
 
+config ESB_TICKER_DIAG
+	bool "Log ESB ticker diagnostic counters every 2 s"
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  Periodically logs prepare/done/abort counters from the ESB ticker
+	  node. Off by default; the counters stay available through
+	  esb_ticker_get_diag() (used by ZMK_ESB_STATS).
+
 config ESB_TICKER_SLOT_US
 	int "ESB ticker slot duration in microseconds"
 	default 2500

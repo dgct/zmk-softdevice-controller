@@ -300,8 +300,14 @@ struct esb_payload {
 			 *  Flag is ignored when selective auto ack is disabled.
 			 */
 	uint8_t pid;    /**< PID assigned during communication. */
+	uint8_t crc_ok; /**< CRC status of the received frame (monitor mode delivers
+			 *  frames with a bad CRC too; PTX/PRX only deliver crc_ok == 1).
+			 */
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
 };
+
+/** @brief Number of received frames dropped for a bad CRC since init (PRX / monitor). */
+uint32_t esb_get_rx_crc_errors(void);
 
 /** @brief Enhanced ShockBurst event. */
 struct esb_evt {

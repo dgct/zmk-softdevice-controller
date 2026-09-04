@@ -491,10 +491,16 @@ static int hci_driver_send(const struct device *dev, struct net_buf *buf)
 		return -EINVAL;
 	}
 
-	/* Vanilla Zephyr stores buffer type in user_data, not as H4 prefix byte.
+#if defined(SDC_HCI_COMMON_DRIVER_DATA)
+	/* Zephyr >= 4.5 hands drivers H:4-framed buffers: the packet type is
+	 * the first byte and bt_buf_get_type() no longer exists. */
+	type = bt_buf_type_from_h4(net_buf_pull_u8(buf), BT_BUF_OUT);
+#else
+	/* Vanilla Zephyr 4.4 stores buffer type in user_data, not as H4 prefix byte.
 	 * Get the type directly from user_data.
 	 */
 	type = bt_buf_get_type(buf);
+#endif
 
 	switch (type) {
 #if defined(CONFIG_BT_CONN)

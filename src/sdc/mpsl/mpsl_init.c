@@ -324,6 +324,30 @@ static void m_assert_handler(const char *const file, const uint32_t line)
 #endif /* IS_ENABLED(CONFIG_MPSL_ASSERT_HANDLER) */
 
 #if !defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
+#if !defined(CONFIG_CLOCK_CONTROL_NRF)
+/* Zephyr >= 4.5 (new per-clock nRF drivers): the 32 kHz source is a
+ * devicetree property of the lfclk node instead of a Kconfig choice
+ * (mirrors sdk-nrf main mpsl_init.c). */
+#define CLOCK_NODE_LFCLK DT_COMPAT_GET_ANY_STATUS_OKAY(nordic_nrf_clock_lfclk)
+
+static uint8_t m_config_clock_source_get(void)
+{
+#if DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, rc)
+	return MPSL_CLOCK_LF_SRC_RC;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, xtal)
+	return MPSL_CLOCK_LF_SRC_XTAL;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, synth)
+	return MPSL_CLOCK_LF_SRC_SYNTH;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, ext_low_swing)
+	return MPSL_CLOCK_LF_SRC_EXT_LOW_SWING;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, ext_full_swing)
+	return MPSL_CLOCK_LF_SRC_EXT_FULL_SWING;
+#else
+	#error "Clock source is not supported or not defined"
+	return 0;
+#endif
+}
+#else /* CONFIG_CLOCK_CONTROL_NRF (legacy driver, Zephyr <= 4.4) */
 static uint8_t m_config_clock_source_get(void)
 {
 #ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
@@ -341,6 +365,7 @@ static uint8_t m_config_clock_source_get(void)
 	return 0;
 #endif
 }
+#endif /* CONFIG_CLOCK_CONTROL_NRF */
 #endif /* !CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
 
 #if defined(CONFIG_MPSL_CALIBRATION_PERIOD)

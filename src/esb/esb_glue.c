@@ -21,6 +21,7 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/logging/log.h>
 #include <nrfx.h>
+#include <hal/nrf_clock.h>
 #include "esb_glue.h"
 #include "esb_workarounds.h"
 
@@ -99,6 +100,36 @@ int esb_clocks_stop(void)
 	esb_revert_nrf54l_39();
 	esb_revert_nrf54l_20();
 
+	LOG_DBG("HF clock stopped");
+	return 0;
+}
+
+#elif !defined(CONFIG_CLOCK_CONTROL_NRF2)
+
+/* Zephyr >= 4.5 per-clock nRF drivers on nRF52/53: the on/off manager getter
+ * is gone; use the reference-counted HFXO request and wait for the crystal. */
+int esb_clocks_start(void)
+{
+	nrf_clock_control_hfxo_request();
+	for (int i = 0; i < 2000; i++) {
+		if (nrf_clock_hf_is_running(NRF_CLOCK, NRF_CLOCK_HFCLK_HIGH_ACCURACY)) {
+			esb_apply_nrf54l_20();
+			esb_apply_nrf54l_39();
+			LOG_DBG("HF clock started");
+			return 0;
+		}
+		k_busy_wait(1);
+	}
+	nrf_clock_control_hfxo_release();
+	LOG_ERR("HFXO did not start");
+	return -ETIMEDOUT;
+}
+
+int esb_clocks_stop(void)
+{
+	nrf_clock_control_hfxo_release();
+	esb_revert_nrf54l_39();
+	esb_revert_nrf54l_20();
 	LOG_DBG("HF clock stopped");
 	return 0;
 }

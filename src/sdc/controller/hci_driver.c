@@ -43,6 +43,18 @@
 #include "zephyr/logging/log.h"
 LOG_MODULE_REGISTER(bt_sdc_hci_driver);
 
+/* Deliver a packet from the controller to the host (API differs by Zephyr version). */
+static inline void hci_driver_deliver(const struct device *dev, struct net_buf *buf)
+{
+#if defined(SDC_HCI_COMMON_DRIVER_DATA)
+	bt_hci_recv(dev, buf);
+#else
+	struct hci_driver_data *driver_data = dev->data;
+
+	(void)driver_data->recv_func(dev, buf);
+#endif
+}
+
 
 #if defined(CONFIG_BT_BUF_EVT_DISCARDABLE_COUNT)
 #define HCI_RX_BUF_SIZE MAX(BT_BUF_RX_SIZE, \
@@ -505,9 +517,7 @@ static int data_packet_process(const struct device *dev, uint8_t *hci_buf)
 
 	net_buf_add_mem(data_buf, &hci_buf[0], len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	driver_data->recv_func(dev, data_buf);
+	hci_driver_deliver(dev, data_buf);
 
 	return 0;
 }
@@ -533,9 +543,7 @@ static int iso_data_packet_process(const struct device *dev, uint8_t *hci_buf)
 
 	net_buf_add_mem(data_buf, &hci_buf[0], len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	(void)driver_data->recv_func(dev, data_buf);
+	hci_driver_deliver(dev, data_buf);
 
 	return 0;
 }
@@ -651,9 +659,7 @@ static int event_packet_process(const struct device *dev, uint8_t *hci_buf)
 
 	net_buf_add_mem(evt_buf, &hci_buf[0], hdr->len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	(void)driver_data->recv_func(dev, evt_buf);
+	hci_driver_deliver(dev, evt_buf);
 
 	return 0;
 }
@@ -1301,7 +1307,11 @@ static int configure_memory_usage(void)
 	return 0;
 }
 
+#if defined(SDC_HCI_COMMON_DRIVER_DATA)
+static int hci_driver_open(const struct device *dev)
+#else
 static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
+#endif
 {
 	LOG_DBG("Open");
 
@@ -1479,9 +1489,11 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 
 	MULTITHREADING_LOCK_RELEASE();
 
+#if !defined(SDC_HCI_COMMON_DRIVER_DATA)
 	struct hci_driver_data *driver_data = dev->data;
 
 	driver_data->recv_func = recv_func;
+#endif
 
 	bt_buf_rx_freed_cb_set(bt_buf_rx_freed_cb);
 
@@ -1522,7 +1534,7 @@ static int hci_driver_close(const struct device *dev)
 	return err;
 }
 
-static const struct bt_hci_driver_api hci_driver_api = {
+static DEVICE_API(bt_hci, hci_driver_api) = {
 	.open = hci_driver_open,
 	.close = hci_driver_close,
 	.send = hci_driver_send,

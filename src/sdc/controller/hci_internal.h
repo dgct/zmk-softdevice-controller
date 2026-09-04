@@ -17,8 +17,21 @@
 #ifndef HCI_INTERNAL_H__
 #define HCI_INTERNAL_H__
 
+/* Zephyr 4.5 (4.4.99-dev) made a common `struct bt_hci_driver_data` mandatory
+ * as the first member of the driver data and moved the recv callback into it
+ * (delivered via bt_hci_recv()); older kernels pass recv to open().
+ */
+#include <zephyr/version.h>
+#if ZEPHYR_VERSION_CODE >= ZEPHYR_VERSION(4, 4, 99)
+#define SDC_HCI_COMMON_DRIVER_DATA 1
+#endif
+
 struct hci_driver_data {
+#if defined(SDC_HCI_COMMON_DRIVER_DATA)
+	struct bt_hci_driver_data common; /* must be first */
+#else
 	bt_hci_recv_t recv_func;
+#endif
 };
 
 /** @brief Send an HCI command packet to the SoftDevice Controller.

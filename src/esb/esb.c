@@ -47,6 +47,7 @@ int ull_esb_reconfigure(uint32_t interval_us);
 uint32_t ull_esb_get_interval_us(void);
 uint32_t ull_esb_get_skip(void);
 int ull_esb_set_skip(uint32_t skip);
+int ull_esb_host_chan_map(uint8_t map[5]);
 
 #include "esb_peripherals.h"
 #include "esb_ppi_api.h"
@@ -298,6 +299,17 @@ static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
 static esb_ack_trailer_cb_t ack_trailer_cb;
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+/* Channel quality sensing and coordinated switching (see esb_ticker.h). */
+static esb_noise_cb_t noise_cb;
+static int16_t scout_channel = -1;    /* channel for the next slot, -1 = link channel */
+static bool scouting;                 /* the current slot is a scout slot */
+static uint8_t link_channel_saved;    /* link channel while scouting */
+static uint8_t switch_channel;        /* announced channel */
+static uint8_t switch_countdown;      /* listen windows until the switch, 0 = none */
+static uint32_t slot_had_frame;       /* ADDRESS seen in the current slot */
+#endif
 static struct esb_payload *current_payload;
 
 #if IS_ENABLED(CONFIG_ESB_LOG_LEVEL_DBG) || IS_ENABLED(CONFIG_ESB_LOG_LEVEL_WRN)
@@ -1430,6 +1442,21 @@ static void esb_timer_handler(nrf_timer_event_t event_type, void *context)
 				  nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS));
 
 		if (!in_flight) {
+			/* Empty window (or scout): sample the channel's noise floor
+			 * while the receiver is still on, ~10 us, once per slot.
+			 */
+			if (esb_state == ESB_STATE_PRX && !slot_had_frame && noise_cb != NULL &&
+			    nrf_radio_state_get(NRF_RADIO) == NRF_RADIO_STATE_RX) {
+				nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_RSSIEND);
+				nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RSSISTART);
+				for (uint32_t i = 0; i < 400; i++) {
+					if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RSSIEND)) {
+						noise_cb(esb_addr.rf_channel,
+							 nrf_radio_rssi_sample_get(NRF_RADIO), scouting);
+						break;
+					}
+				}
+			}
 			ticker_close_now();
 		}
 	}
@@ -2204,6 +2231,10 @@ static void on_radio_disabled_rx(void)
 	struct pipe_info *pipe_info;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
+
+#if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+	slot_had_frame = 1U;
+#endif
 
 	if (!nrf_radio_crc_status_check(NRF_RADIO)) {
 		rx_crc_errors++;
@@ -3367,6 +3398,13 @@ int esb_set_rf_channel(uint32_t channel)
 			} else {
 				atomic_set_bit(&esb_addr.rf_channel_flags, RF_CHANNEL_UPDATE_FLAG);
 			}
+		} else if (esb_state == ESB_STATE_WAIT_TICKER || esb_state == ESB_STATE_WAIT_MPSL ||
+			   esb_state == ESB_STATE_PRX) {
+			/* A receiver between or inside listen windows: the frequency
+			 * is programmed at every RX (re)start, so the change takes
+			 * effect at the next window without disturbing this one.
+			 */
+			atomic_set_bit(&esb_addr.rf_channel_flags, RF_CHANNEL_UPDATE_FLAG);
 		} else {
 			return -EBUSY;
 		}
@@ -3833,6 +3871,25 @@ int esb_ticker_event_start(uint32_t slot_duration_us)
 	nrf_timer_int_enable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
 	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 
+	/* Channel for this slot: a one-off scout channel, or the link channel
+	 * with an announced switch applied when its window countdown ends.
+	 */
+	slot_had_frame = 0U;
+	scouting = false;
+	if (ts_next_action == TS_NEXT_ACTION_RX) {
+		if (switch_countdown != 0U) {
+			if (--switch_countdown == 0U) {
+				esb_addr.rf_channel = switch_channel;
+			}
+		}
+		if (scout_channel >= 0) {
+			link_channel_saved = esb_addr.rf_channel;
+			esb_addr.rf_channel = (uint8_t)scout_channel;
+			scout_channel = -1;
+			scouting = true;
+		}
+	}
+
 	/* Start the pending action */
 	switch (ts_next_action) {
 	case TS_NEXT_ACTION_RX:
@@ -3895,6 +3952,11 @@ void esb_ticker_event_end(void)
 	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
 	nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
 
+	if (scouting) {
+		esb_addr.rf_channel = link_channel_saved;
+		scouting = false;
+	}
+
 	/* Reset ts_next_action back to RX so esb_ticker_is_active() returns
 	 * true on the next tick. Without this, the timer handler's
 	 * TS_NEXT_ACTION_CLOSE causes ESB to stop after one event.
@@ -3927,8 +3989,47 @@ void esb_ticker_event_abort(void)
 	nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
 	nrf_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE0_MASK);
 
+	if (scouting) {
+		esb_addr.rf_channel = link_channel_saved;
+		scouting = false;
+	}
+
 	esb_state = ESB_STATE_WAIT_TICKER;
 	esb_ticker_event_done_flag = true;
+}
+
+void esb_set_noise_cb(esb_noise_cb_t cb)
+{
+	noise_cb = cb;
+}
+
+int esb_ticker_scout(uint8_t channel)
+{
+	if (channel > 100U) {
+		return -EINVAL;
+	}
+	scout_channel = channel;
+	return 0;
+}
+
+int esb_ticker_schedule_channel(uint8_t channel, uint8_t windows)
+{
+	if (channel > 100U || windows == 0U) {
+		return -EINVAL;
+	}
+	switch_channel = channel;
+	switch_countdown = windows;
+	return 0;
+}
+
+uint8_t esb_ticker_channel_countdown(void)
+{
+	return switch_countdown;
+}
+
+int esb_get_host_chan_map(uint8_t map[5])
+{
+	return ull_esb_host_chan_map(map);
 }
 
 void esb_ticker_slot_close(void)

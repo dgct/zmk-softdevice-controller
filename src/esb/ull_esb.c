@@ -9,6 +9,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <string.h>
 #include <soc.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -384,6 +385,22 @@ uint32_t ull_esb_get_slot_us(void)
 uint32_t ull_esb_get_skip(void)
 {
 	return esb_ticker_skip;
+}
+
+int ull_esb_host_chan_map(uint8_t map[5])
+{
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+	struct ll_conn *conn = anchor_conn_find();
+
+	if (conn == NULL) {
+		return -ENOTCONN;
+	}
+	memcpy(map, conn->lll.data_chan_map, 5);
+	return 0;
+#else
+	ARG_UNUSED(map);
+	return -ENOTSUP;
+#endif
 }
 
 static void esb_skip_apply_handler(struct k_work *work)

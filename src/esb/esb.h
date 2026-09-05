@@ -698,6 +698,33 @@ int esb_set_ticker_interval_us(uint32_t interval_us);
 /** @brief Get the current ESB ticker period in microseconds (ticker mode). */
 uint32_t esb_get_ticker_interval_us(void);
 
+/** @brief Noise / scout sample callback (radio slot timer ISR, ticker mode).
+ *
+ *  Called at the end of every listen window in which no frame arrived, with
+ *  the RSSI sampled while the receiver was still on (as -dBm), the channel it
+ *  listened on and whether this was a one-off scout window. Keep it short.
+ */
+typedef void (*esb_noise_cb_t)(uint8_t channel, uint8_t rssi_neg_dbm, bool scout);
+void esb_set_noise_cb(esb_noise_cb_t cb);
+
+/** @brief Listen on @p channel for the next window only (channel sensing). */
+int esb_ticker_scout(uint8_t channel);
+
+/** @brief Switch the link channel after @p windows listen windows.
+ *
+ *  The trailer callback can read the remaining count with
+ *  esb_ticker_channel_countdown() to tell the peripheral when to follow.
+ */
+int esb_ticker_schedule_channel(uint8_t channel, uint8_t windows);
+uint8_t esb_ticker_channel_countdown(void);
+
+/** @brief Host BLE link data channel map (37 bits, LSB first), peripheral role.
+ *
+ *  @retval 0 map filled; -ENOTCONN without a host connection; -ENOTSUP
+ *  when the controller does not expose it (SoftDevice Controller).
+ */
+int esb_get_host_chan_map(uint8_t map[5]);
+
 /** @brief Windows the ticker node currently skips between two it listens in.
  *
  *  0 = the radio listens in every ESB period; n = every (n + 1)th period

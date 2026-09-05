@@ -56,6 +56,9 @@ uint32_t ull_esb_get_slot_us(void);
 /** @brief Windows skipped between listens (0 = every window). */
 uint32_t ull_esb_get_skip(void);
 
+/** @brief Copy the host link's data channel map (see esb_get_host_chan_map). */
+int ull_esb_host_chan_map(uint8_t map[5]);
+
 /**
  * @brief Listen in every (skip + 1)th ESB period (idle tiers).
  *

@@ -236,10 +236,13 @@ config ESB_TICKER_SLOT_RESERVE
 	help
 	  When set, the ESB ticker node reserves its slot like a BLE role does,
 	  so the scheduler resolves collisions between ESB and BLE nodes (and
-	  may skip ESB expiries that overlap a BLE reservation). When unset the
-	  node is slot-less: it always expires and yields to any BLE event at
-	  the LLL level instead. Slot-less is the coexistence policy this
-	  driver is designed around.
+	  may skip ESB expiries that overlap a BLE reservation, which with
+	  EVENT_OVERHEAD_RESERVE_MAX covers most of a short connection
+	  interval). When unset the node is slot-less: it always expires, and
+	  the controller's preemption rule (lll_user_prepare_yields) cancels it
+	  whenever a Bluetooth role is on the air, while a running ESB slot
+	  yields to any Bluetooth event. Slot-less is the coexistence policy
+	  this driver is designed around.
 
 config ESB_TICKER_START_DELAY_MS
 	int "Delay before the ESB ticker starts once its preconditions hold (ms)"
@@ -252,15 +255,15 @@ config ESB_TICKER_START_DELAY_MS
 	  console must come up first to see the earliest log lines.
 
 config ESB_TICKER_YIELD_CONN_ONLY
-	bool "Yield an ESB slot only to BLE connection events"
-	default y
+	bool "Yield a running ESB slot only to BLE connection events"
+	default n
 	depends on ESB_TICKER_TIMESLOT
 	help
-	  A running ESB slot is preempted only by a connection event (the host
-	  link must never lose an anchor). Advertising, which has no timing
-	  obligation, is refused while ESB is on the air and simply skips that
-	  one advertising event, so the split link keeps working with no host
-	  connected. Disable to yield to every BLE role as before.
+	  By default a running ESB slot yields to every Bluetooth role, and an
+	  ESB slot never preempts one (the controller cancels the ESB prepare
+	  instead), so Bluetooth always wins. Enable this to refuse advertising
+	  while ESB is on the air: that advertising instance is skipped, which
+	  favours the split link over connection establishment.
 
 config ESB_TICKER_ANCHOR_BLE
 	bool "Align the ESB ticker to the BLE peripheral connection anchor"

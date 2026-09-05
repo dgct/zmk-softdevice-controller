@@ -80,13 +80,28 @@ void lll_esb_prepare(void *param)
 }
 
 /**
+ * @brief The controller must never let an ESB slot displace a Bluetooth role.
+ *
+ * Called by the controller's preemption logic (lll.c, CONFIG_BT_CTLR_USER_EXT)
+ * when a queued prepare is about to preempt the running event: for the ESB
+ * node it returns true and the ESB prepare is cancelled instead, so a
+ * connection or advertising event that runs long is never aborted by ESB.
+ * Together with esb_lll_is_abort_cb() yielding, Bluetooth wins both ways and
+ * ESB runs only in the gaps.
+ */
+bool lll_user_prepare_yields(void *param)
+{
+	return param == &ull_esb_get()->lll;
+}
+
+/**
  * @brief Abort policy callback.
  *
  * Determines whether the current ESB event can be preempted by the incoming
- * BLE event. Connection events always win (the host link keeps its anchor).
- * With CONFIG_ESB_TICKER_YIELD_CONN_ONLY an advertising (or any other role's)
- * event is refused: the controller cancels that one instance, and the ESB
- * slot completes; the next advertising interval is unaffected.
+ * BLE event. Every Bluetooth role wins by default. With
+ * CONFIG_ESB_TICKER_YIELD_CONN_ONLY an advertising (or any other non-
+ * connection) event is refused instead: the controller cancels that one
+ * instance and the ESB slot completes.
  *
  * @param next  LLL context of the incoming event.
  * @return -ECANCELED to allow preemption, 0 to refuse it.

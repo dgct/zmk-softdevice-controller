@@ -15,6 +15,15 @@
 #if defined(CONFIG_BT_CTLR_USER_EXT)
 
 #if defined(CONFIG_ESB_TICKER_TIMESLOT)
+/* Ticker operation queue depth the ESB node adds on top of the Bluetooth
+ * roles' own budget: a drift update per ESB expiry from ULL_HIGH (anchor
+ * tracking) and start/stop/lazy updates from thread context. Without these
+ * a full queue makes a role's own ticker_update() fail, which the
+ * controller asserts on.
+ */
+#define TICKER_USER_ULL_HIGH_VENDOR_OPS 2
+#define TICKER_USER_THREAD_VENDOR_OPS   2
+
 /* Forward declarations — avoid pulling in ull_esb.h (which includes lll.h,
  * conflicting with ull.c's own lll.h include).
  */

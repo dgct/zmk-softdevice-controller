@@ -206,7 +206,7 @@ static void anchor_track(uint32_t ticks_at_expire)
 
 	if ((ret == TICKER_STATUS_SUCCESS) || (ret == TICKER_STATUS_BUSY)) {
 		anchor.updates++;
-		anchor.settle = 2U;
+		anchor.settle = 4U;
 	}
 }
 #endif /* CONFIG_ESB_TICKER_ANCHOR_BLE */

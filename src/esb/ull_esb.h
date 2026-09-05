@@ -56,6 +56,9 @@ uint32_t ull_esb_get_slot_us(void);
 /** @brief Windows skipped between listens (0 = every window). */
 uint32_t ull_esb_get_skip(void);
 
+/** @brief True when @p lll is the link-layer context of an active connection. */
+bool ull_esb_is_conn_lll(const void *lll);
+
 /** @brief Copy the host link's data channel map (see esb_get_host_chan_map). */
 int ull_esb_host_chan_map(uint8_t map[5]);
 

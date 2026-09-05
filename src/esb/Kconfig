@@ -251,6 +251,17 @@ config ESB_TICKER_START_DELAY_MS
 	  the controller's ull_user_init() have run. A delay only helps when a
 	  console must come up first to see the earliest log lines.
 
+config ESB_TICKER_YIELD_CONN_ONLY
+	bool "Yield an ESB slot only to BLE connection events"
+	default y
+	depends on ESB_TICKER_TIMESLOT
+	help
+	  A running ESB slot is preempted only by a connection event (the host
+	  link must never lose an anchor). Advertising, which has no timing
+	  obligation, is refused while ESB is on the air and simply skips that
+	  one advertising event, so the split link keeps working with no host
+	  connected. Disable to yield to every BLE role as before.
+
 config ESB_TICKER_ANCHOR_BLE
 	bool "Align the ESB ticker to the BLE peripheral connection anchor"
 	default y

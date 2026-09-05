@@ -103,6 +103,7 @@ struct esb_ticker_diag {
 	uint32_t abort_active;   /* slots aborted while the radio was running */
 	uint32_t abort_pipeline; /* prepares cancelled before starting */
 	uint32_t errors;         /* event_start failures */
+	uint32_t refused;        /* non-connection BLE events refused preemption */
 	uint32_t interval_us;    /* current ticker period */
 	uint32_t slot_us;        /* current slot length */
 	uint32_t skip;           /* windows skipped between listens (idle tiers) */

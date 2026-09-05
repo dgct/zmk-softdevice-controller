@@ -88,6 +88,7 @@ extern uint32_t esb_diag_abort_active_count;
 extern uint32_t esb_diag_abort_pipeline_count;
 extern uint32_t esb_diag_err_count;
 extern uint32_t esb_diag_defer_count;
+extern uint32_t esb_diag_refused_count;
 
 static void esb_diag_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(esb_diag_work, esb_diag_work_handler);
@@ -218,6 +219,7 @@ void esb_ticker_get_diag(struct esb_ticker_diag *out)
 	out->abort_active = esb_diag_abort_active_count;
 	out->abort_pipeline = esb_diag_abort_pipeline_count;
 	out->errors = esb_diag_err_count;
+	out->refused = esb_diag_refused_count;
 	out->interval_us = esb_ticker_interval_us;
 	out->slot_us = esb_ticker_slot_us;
 	out->skip = esb_ticker_skip;
@@ -385,6 +387,23 @@ uint32_t ull_esb_get_slot_us(void)
 uint32_t ull_esb_get_skip(void)
 {
 	return esb_ticker_skip;
+}
+
+bool ull_esb_is_conn_lll(const void *lll)
+{
+#if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
+	for (uint16_t h = 0U; h < CONFIG_BT_MAX_CONN; h++) {
+		struct ll_conn *conn = ll_connected_get(h);
+
+		if (conn && (&conn->lll == lll)) {
+			return true;
+		}
+	}
+	return false;
+#else
+	ARG_UNUSED(lll);
+	return true; /* cannot tell: treat every event as a connection */
+#endif
 }
 
 int ull_esb_host_chan_map(uint8_t map[5])

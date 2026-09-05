@@ -47,6 +47,7 @@ uint32_t esb_diag_abort_active_count;
 uint32_t esb_diag_abort_pipeline_count;
 uint32_t esb_diag_err_count;
 uint32_t esb_diag_defer_count;
+uint32_t esb_diag_refused_count;
 
 void lll_esb_prepare(void *param)
 {
@@ -81,17 +82,25 @@ void lll_esb_prepare(void *param)
 /**
  * @brief Abort policy callback.
  *
- * Determines whether the current ESB event can be preempted by a
- * higher-priority event (e.g., BLE connection). ESB is lower priority
- * than BLE connections, so we always yield.
+ * Determines whether the current ESB event can be preempted by the incoming
+ * BLE event. Connection events always win (the host link keeps its anchor).
+ * With CONFIG_ESB_TICKER_YIELD_CONN_ONLY an advertising (or any other role's)
+ * event is refused: the controller cancels that one instance, and the ESB
+ * slot completes; the next advertising interval is unaffected.
  *
- * @return -ECANCELED to allow preemption (yield to BLE)
- *         0 to refuse (never used — ESB always yields)
+ * @param next  LLL context of the incoming event.
+ * @return -ECANCELED to allow preemption, 0 to refuse it.
  */
 static int esb_lll_is_abort_cb(void *next, void *curr,
 			       lll_prepare_cb_t *resume_cb)
 {
-	/* ESB always yields to BLE events */
+	ARG_UNUSED(curr);
+	ARG_UNUSED(resume_cb);
+
+	if (IS_ENABLED(CONFIG_ESB_TICKER_YIELD_CONN_ONLY) && !ull_esb_is_conn_lll(next)) {
+		esb_diag_refused_count++;
+		return 0;
+	}
 	return -ECANCELED;
 }
 

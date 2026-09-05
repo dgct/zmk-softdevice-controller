@@ -653,7 +653,8 @@ static void set_tier(enum subrate_tier tier) {
 
     if (tier == current_tier && tier_confirmed) return;
 
-    enum subrate_tier prev_tier = current_tier;
+    /* Only read by the host-dormant block below (ZMK_BLE_HOST_CONN_PARAM_DORMANT). */
+    __maybe_unused enum subrate_tier prev_tier = current_tier;
     current_tier = tier;
     tier_confirmed = false;
 

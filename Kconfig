@@ -57,6 +57,19 @@ config ZMK_BLE_SUBRATE_IDLE_MAX_LATENCY
 	default 2
 	range 0 499
 
+# IDLE tier entry delay
+config ZMK_BLE_SUBRATE_IDLE_DELAY
+	int "Milliseconds of ZMK idle before the IDLE tier"
+	default 30000
+	range 0 3600000
+	help
+	  The split link leaves the ACTIVE tier for the IDLE tier this many
+	  milliseconds after ZMK reports the idle activity state. ZMK's own
+	  idle timeout (ZMK_IDLE_TIMEOUT) is often set short for display or
+	  trackpad power management; this delay keeps the split link at full
+	  rate across ordinary typing pauses, so the first key after a pause
+	  is not held for a subrated interval. 0 enters IDLE immediately.
+
 # DORMANT tier
 config ZMK_BLE_SUBRATE_DORMANT_DELAY
 	int "Milliseconds before dormant tier"
@@ -592,6 +605,32 @@ config ZMK_BLE_POWER_CONTROL_APR_MARGIN
 	  ping-pong power oscillations. Default 5 dB.
 
 endif # ZMK_BLE_POWER_CONTROL_AUTO
+
+# ============================================================================
+# Split link TX power
+# ============================================================================
+
+config ZMK_BLE_SPLIT_LINK_TX_POWER_SET
+	bool "Dedicated TX power for the split link"
+	depends on ZMK_BT_LL_SOFTDEVICE
+	depends on ZMK_SPLIT_ROLE_CENTRAL
+	help
+	  Write a per-connection TX power for the split link (central-role
+	  connections) with HCI_VS_Write_Tx_Power_Level when the link comes up.
+	  The board TX power (BT_CTLR_TX_PWR_*) keeps sizing advertising and
+	  the host link; the split link is a few tens of centimetres away and
+	  needs far less. LE Power Control, when enabled, adjusts from this
+	  starting point.
+
+config ZMK_BLE_SPLIT_LINK_TX_POWER
+	int "Split link TX power (dBm)"
+	depends on ZMK_BLE_SPLIT_LINK_TX_POWER_SET
+	default 0
+	range -40 8
+	help
+	  Initial TX power of the split link in dBm. The controller rounds to
+	  the nearest level it supports (nRF52840: -40, -20, -16, -12, -8, -4,
+	  0, and +2 to +8).
 
 # ============================================================================
 # LE Path Loss Monitoring

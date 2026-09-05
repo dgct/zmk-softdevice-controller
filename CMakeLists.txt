@@ -71,6 +71,10 @@ if(CONFIG_ZMK_BLE_POWER_CONTROL_AUTO)
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 endif()
 
+if(CONFIG_ZMK_BLE_SPLIT_LINK_TX_POWER_SET)
+  zephyr_library_sources(src/split_tx_power.c)
+endif()
+
 if(CONFIG_ZMK_BLE_PATH_LOSS_MONITORING)
   zephyr_library_sources(src/path_loss.c)
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)

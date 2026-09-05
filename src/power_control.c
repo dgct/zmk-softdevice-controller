@@ -4,9 +4,11 @@
  *
  * LE Power Control autonomous mode configuration for SoftDevice Controller.
  * Enables automatic TX power adjustments based on RSSI feedback from the peer.
+ * Configured once per boot on every half (the parameters are controller-global).
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/hci.h>
@@ -62,27 +64,42 @@ static int configure_power_control(void)
         return err;
 }
 
-static void power_control_security_changed_cb(struct bt_conn *conn,
-                                              bt_security_t level,
-                                              enum bt_security_err err)
+/* The parameters are controller-global (no connection handle), so they can be
+ * written as soon as the controller is up. Doing it at init means every
+ * connection, including the host link on a peripheral-only half, runs with
+ * autonomous power control from its first event; the connected callback is
+ * the retry path if the init-time write could not be made. */
+static void power_control_try_configure(void)
 {
-        if (err || level < BT_SECURITY_L2) {
+        if (power_control_configured) {
                 return;
         }
-
-        struct bt_conn_info info;
-        if (bt_conn_get_info(conn, &info) || info.role != BT_CONN_ROLE_CENTRAL) {
-                return;
-        }
-
-        if (!power_control_configured) {
-                int ret = configure_power_control();
-                if (!ret) {
-                        power_control_configured = true;
-                }
+        if (!configure_power_control()) {
+                power_control_configured = true;
         }
 }
 
+static void power_control_connected_cb(struct bt_conn *conn, uint8_t err)
+{
+        if (err) {
+                return;
+        }
+        power_control_try_configure();
+}
+
 BT_CONN_CB_DEFINE(power_control_conn_cb) = {
-        .security_changed = power_control_security_changed_cb,
+        .connected = power_control_connected_cb,
 };
+
+static int power_control_init(void)
+{
+        if (!bt_is_ready()) {
+                LOG_WRN("Bluetooth not ready at init; power control configured on first connection");
+                return 0;
+        }
+        power_control_try_configure();
+        return 0;
+}
+
+/* After ZMK's BLE init (CONFIG_ZMK_BLE_INIT_PRIORITY), which enables Bluetooth. */
+SYS_INIT(power_control_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

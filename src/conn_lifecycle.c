@@ -61,6 +61,7 @@ LOG_MODULE_REGISTER(conn_lifecycle, CONFIG_ZMK_BLE_SCI_LOG_LEVEL);
 
 #define SUBRATE_TIMEOUT            CONFIG_ZMK_BLE_SUBRATE_TIMEOUT
 #define SUBRATE_DORMANT_DELAY_MS   CONFIG_ZMK_BLE_SUBRATE_DORMANT_DELAY
+#define SUBRATE_IDLE_DELAY_MS      CONFIG_ZMK_BLE_SUBRATE_IDLE_DELAY
 
 #define SUBRATE_ACTIVE_MIN         CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MIN
 #define SUBRATE_ACTIVE_MAX         CONFIG_ZMK_BLE_SUBRATE_ACTIVE_MAX
@@ -176,6 +177,8 @@ static uint8_t tier_retry_count;
 
 static void dormant_timer_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(dormant_work, dormant_timer_handler);
+static void idle_timer_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(idle_work, idle_timer_handler);
 static void tier_retry_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tier_retry_work, tier_retry_handler);
 #endif
@@ -498,6 +501,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
          * could fire after disconnect and call bt_conn_foreach on dead conns.
          * Reset all subrating state so the next connection starts clean. */
         k_work_cancel_delayable(&tier_retry_work);
+        k_work_cancel_delayable(&idle_work);
         k_work_cancel_delayable(&dormant_work);
         tier_retry_count = 0;
         tier_confirmed = true;
@@ -724,14 +728,32 @@ static void tier_retry_handler(struct k_work *work) {
 }
 
 static void subrate_active(void) {
+    k_work_cancel_delayable(&idle_work);
     k_work_cancel_delayable(&dormant_work);
     set_tier(TIER_ACTIVE);
 }
 
-static void subrate_idle(void) {
+static void enter_idle_tier(void) {
     k_work_cancel_delayable(&dormant_work);
     set_tier(TIER_IDLE);
     k_work_schedule(&dormant_work, K_MSEC(SUBRATE_DORMANT_DELAY_MS));
+}
+
+static void idle_timer_handler(struct k_work *work) {
+    enter_idle_tier();
+}
+
+/* ZMK's idle state can arrive within a second or two of the last key (the
+ * keyboard's idle timeout serves display and trackpad power management).
+ * Hold the ACTIVE tier for SUBRATE_IDLE_DELAY_MS more so that ordinary
+ * typing pauses do not park the link at the subrated IDLE cadence. */
+static void subrate_idle(void) {
+    if (SUBRATE_IDLE_DELAY_MS == 0) {
+        enter_idle_tier();
+        return;
+    }
+    k_work_cancel_delayable(&dormant_work);
+    k_work_schedule(&idle_work, K_MSEC(SUBRATE_IDLE_DELAY_MS));
 }
 
 /* Apply correct subrating tier when CS_OPERATIONAL is reached.
@@ -797,6 +819,7 @@ static int activity_listener(const zmk_event_t *eh) {
         subrate_idle();
         break;
     case ZMK_ACTIVITY_SLEEP:
+        k_work_cancel_delayable(&idle_work);
         k_work_cancel_delayable(&dormant_work);
         set_tier(TIER_DORMANT);
         break;
@@ -878,9 +901,9 @@ static int conn_lifecycle_init(void) {
 
 #if IS_ENABLED(CONFIG_BT_SUBRATING) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     bt_conn_le_subrate_set_defaults(&idle_params);
-    LOG_INF("Subrating: active=%d-%d, idle=%d-%d, dormant=%d-%d (delay=%ds)",
+    LOG_INF("Subrating: active=%d-%d, idle=%d-%d (delay=%ds), dormant=%d-%d (delay=%ds)",
             SUBRATE_ACTIVE_MIN, SUBRATE_ACTIVE_MAX,
-            SUBRATE_IDLE_MIN, SUBRATE_IDLE_MAX,
+            SUBRATE_IDLE_MIN, SUBRATE_IDLE_MAX, SUBRATE_IDLE_DELAY_MS / 1000,
             SUBRATE_DORMANT_MIN, SUBRATE_DORMANT_MAX,
             SUBRATE_DORMANT_DELAY_MS / 1000);
 #endif

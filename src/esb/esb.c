@@ -299,6 +299,8 @@ static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
 static esb_ack_trailer_cb_t ack_trailer_cb;
+/* Monitor mode: CRC result of the frame being pushed (see on_radio_end_monitor). */
+static bool monitor_crc_ok;
 
 #if IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
 /* Channel quality sensing and coordinated switching (see esb_ticker.h). */
@@ -1362,7 +1364,9 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 	rx_fifo.payload[rx_fifo.back]->pipe = pipe;
 	rx_fifo.payload[rx_fifo.back]->rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	rx_fifo.payload[rx_fifo.back]->pid = pid;
-	rx_fifo.payload[rx_fifo.back]->crc_ok = nrf_radio_crc_status_check(NRF_RADIO) ? 1 : 0;
+	rx_fifo.payload[rx_fifo.back]->crc_ok =
+		(esb_cfg.mode == ESB_MODE_MONITOR) ? (monitor_crc_ok ? 1 : 0)
+						   : (nrf_radio_crc_status_check(NRF_RADIO) ? 1 : 0);
 	rx_fifo.payload[rx_fifo.back]->noack = !rx_pdu->type.dpl_pdu.ack;
 
 	if (++rx_fifo.back >= CONFIG_ESB_RX_FIFO_SIZE) {
@@ -2080,6 +2084,8 @@ static void start_rx_listening(void)
 
 	if (esb_cfg.mode == ESB_MODE_MONITOR) {
 		nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_MONITOR);
+		nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+		nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR);
 		nrf_radio_event_clear(NRF_RADIO, ESB_RADIO_EVENT_END);
 		nrf_radio_int_enable(NRF_RADIO, ESB_RADIO_INT_END_MASK);
 		on_radio_disabled = NULL;
@@ -2362,7 +2368,14 @@ static void on_radio_end_monitor(void)
 	struct pipe_info pipe;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
-	if (!nrf_radio_crc_status_check(NRF_RADIO)) {
+	/* The END->START short has already restarted reception by the time this
+	 * runs, so CRCSTATUS is not trustworthy; the CRCOK/CRCERROR events are
+	 * latched per packet until cleared.
+	 */
+	monitor_crc_ok = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR);
+	if (!monitor_crc_ok) {
 		rx_crc_errors++;
 	}
 	pipe.pid = rx_pdu->type.dpl_pdu.pid;

@@ -3390,13 +3390,21 @@ int esb_get_rf_channel(uint32_t *channel)
 
 int esb_set_tx_power(int8_t tx_output_power)
 {
-	if (esb_state != ESB_STATE_IDLE) {
+	/* The level is programmed at the start of every transmission and ACK
+	 * (update_radio_tx_power), so it may change whenever no transmission
+	 * is in progress: idle, or a PRX waiting for / inside a listen window.
+	 * That lets a ticker- or MPSL-mode receiver adapt its ACK power.
+	 */
+	switch (esb_state) {
+	case ESB_STATE_IDLE:
+	case ESB_STATE_WAIT_MPSL:
+	case ESB_STATE_WAIT_TICKER:
+	case ESB_STATE_PRX:
+		esb_cfg.tx_output_power = tx_output_power;
+		return 0;
+	default:
 		return -EBUSY;
 	}
-
-	esb_cfg.tx_output_power = tx_output_power;
-
-	return 0;
 }
 
 int esb_set_retransmit_delay(uint16_t delay)

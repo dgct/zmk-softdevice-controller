@@ -57,6 +57,14 @@ uint32_t ull_esb_get_slot_us(void);
 uint32_t ull_esb_get_skip(void);
 
 /**
+ * @brief Listen in every (skip + 1)th ESB period (idle tiers).
+ *
+ * Applied through a ticker lazy update from thread context; the requested
+ * value is reported by ull_esb_get_skip() immediately. Any context.
+ */
+int ull_esb_set_skip(uint32_t skip);
+
+/**
  * @brief Request deferred ESB ticker start.
  *
  * Submits a work item to start the ESB ticker on the system workqueue.

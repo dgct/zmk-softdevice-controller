@@ -46,6 +46,7 @@ void ull_esb_request_start(void);
 int ull_esb_reconfigure(uint32_t interval_us);
 uint32_t ull_esb_get_interval_us(void);
 uint32_t ull_esb_get_skip(void);
+int ull_esb_set_skip(uint32_t skip);
 
 #include "esb_peripherals.h"
 #include "esb_ppi_api.h"
@@ -2905,6 +2906,20 @@ bool esb_is_idle(void)
 void esb_set_rx_interval(uint32_t interval_us)
 {
 	esb_rx_interval_us = interval_us;
+}
+#elif IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
+void esb_set_rx_interval(uint32_t interval_us)
+{
+	/* Ticker mode: the listen interval is a whole number of ticker
+	 * periods; 0 restores every period.
+	 */
+	uint32_t period = ull_esb_get_interval_us();
+	uint32_t skip = 0U;
+
+	if (interval_us != 0U && period != 0U && interval_us > period) {
+		skip = (interval_us + period / 2U) / period - 1U;
+	}
+	(void)ull_esb_set_skip(skip);
 }
 #endif
 

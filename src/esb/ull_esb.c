@@ -64,6 +64,8 @@ static bool esb_ticker_running;
  */
 static uint32_t esb_ticker_interval_us = CONFIG_ESB_TICKER_INTERVAL_US;
 static uint32_t esb_ticker_slot_us;
+static uint32_t esb_ticker_skip;
+static uint32_t esb_ticker_skip_applied;
 static atomic_t esb_pending_interval_us;
 
 /* Mayfly for dispatching LLL prepare from ULL context */
@@ -217,6 +219,7 @@ void esb_ticker_get_diag(struct esb_ticker_diag *out)
 	out->errors = esb_diag_err_count;
 	out->interval_us = esb_ticker_interval_us;
 	out->slot_us = esb_ticker_slot_us;
+	out->skip = esb_ticker_skip;
 	out->running = esb_ticker_running;
 #if IS_ENABLED(CONFIG_ESB_TICKER_ANCHOR_BLE)
 	out->anchor_updates = anchor.updates;
@@ -368,14 +371,57 @@ uint32_t ull_esb_get_slot_us(void)
 	return esb_ticker_slot_us;
 }
 
-/* Listen tier: windows skipped between two the node listens in. Set by the
- * ticker lazy update (Stage 3); 0 = every window.
+/* ---- Listen tiers ----
+ *
+ * The node listens in every ESB period while the keyboard is active and in
+ * every (skip + 1)th period when idle, through the ticker's lazy mechanism:
+ * skipped expiries never reach the callback (no prepare, no radio), the
+ * expiry grid itself is untouched, so the BLE anchor tracking and the
+ * peripheral's phase prediction stay valid. The requested skip is visible
+ * immediately (it is what the ACK trailer reports); the ticker update is
+ * applied from thread context.
  */
-static uint32_t esb_ticker_skip;
-
 uint32_t ull_esb_get_skip(void)
 {
 	return esb_ticker_skip;
+}
+
+static void esb_skip_apply_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	uint32_t skip = esb_ticker_skip;
+
+	if (!esb_ticker_running || skip == esb_ticker_skip_applied) {
+		return;
+	}
+
+	uint32_t ret = ticker_update(TICKER_INSTANCE_ID_CTLR,
+				     TICKER_USER_ID_THREAD,
+				     TICKER_ID_USER_BASE,
+				     0U, 0U,             /* no drift */
+				     0U, 0U,             /* slot unchanged */
+				     (uint16_t)(skip + 1U), /* lazy: skip + 1 (0 = unchanged) */
+				     0U,                 /* force */
+				     ticker_op_cb, NULL);
+
+	if ((ret == TICKER_STATUS_SUCCESS) || (ret == TICKER_STATUS_BUSY)) {
+		esb_ticker_skip_applied = skip;
+		LOG_INF("ULL ESB: listen every %u. period", skip + 1U);
+	} else {
+		LOG_WRN("ULL ESB: lazy update failed (%u)", ret);
+	}
+}
+static K_WORK_DEFINE(esb_skip_apply_work, esb_skip_apply_handler);
+
+int ull_esb_set_skip(uint32_t skip)
+{
+	if (skip > 127U) {
+		skip = 127U;
+	}
+	esb_ticker_skip = skip;
+	k_work_submit(&esb_skip_apply_work);
+	return 0;
 }
 
 int ull_esb_start(void)
@@ -425,6 +471,10 @@ int ull_esb_start(void)
 	}
 
 	esb_ticker_running = true;
+	esb_ticker_skip_applied = 0U;
+	if (esb_ticker_skip != 0U) {
+		k_work_submit(&esb_skip_apply_work);
+	}
 
 	LOG_INF("ULL ESB: ticker started (interval=%u us, slot=%u us, %s)",
 		esb_ticker_interval_us, esb_ticker_slot_us,

@@ -668,13 +668,13 @@ int esb_set_bitrate(enum esb_bitrate bitrate);
  */
 int esb_reuse_pid(uint8_t pipe);
 
-#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)
+#if IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) || IS_ENABLED(CONFIG_ESB_TICKER_TIMESLOT)
 /** @brief Set periodic RX window interval for power saving.
  *
- *  When set to 0 (default), the PRX requests EARLIEST timeslots continuously.
- *  When set to a non-zero value (microseconds), the PRX requests NORMAL
- *  timeslots spaced by the given interval, allowing the radio and HFXO to
- *  sleep between windows.
+ *  MPSL mode: 0 (default) requests EARLIEST timeslots continuously, a
+ *  non-zero value (microseconds) requests NORMAL timeslots spaced by that
+ *  interval. Ticker mode: the node listens in every (n + 1)th ticker period,
+ *  n = the interval rounded to whole periods minus one; 0 = every period.
  *
  *  @param[in] interval_us  Interval between RX windows in microseconds,
  *                          or 0 for continuous listening.

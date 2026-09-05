@@ -105,6 +105,7 @@ struct esb_ticker_diag {
 	uint32_t errors;         /* event_start failures */
 	uint32_t interval_us;    /* current ticker period */
 	uint32_t slot_us;        /* current slot length */
+	uint32_t skip;           /* windows skipped between listens (idle tiers) */
 	uint32_t anchor_updates; /* drift corrections applied to follow the BLE anchor */
 	int32_t anchor_err_us;   /* last measured phase error vs the BLE anchor (+ = late) */
 	bool anchor_locked;      /* a peripheral-role connection is being tracked */

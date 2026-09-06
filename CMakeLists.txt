@@ -41,13 +41,12 @@ if(CONFIG_BT_CTLR_USER_EXT)
   endif()
 endif()
 
-# Subrating is now integrated into conn_lifecycle.c
 if(CONFIG_ZMK_BT_LL_SOFTDEVICE AND CONFIG_BT_SUBRATING)
   zephyr_include_directories(${APPLICATION_SOURCE_DIR}/include)
 endif()
 
-if(CONFIG_ZMK_BLE_SCI)
-  zephyr_library_sources(src/conn_lifecycle.c)
+if(CONFIG_ZMK_BT_LL_SOFTDEVICE AND CONFIG_BT_SUBRATING AND CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+  zephyr_library_sources(src/subrating.c)
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 endif()
 

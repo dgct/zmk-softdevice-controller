@@ -1,7 +1,7 @@
 rsource "src/sdc/Kconfig"
 rsource "src/esb/Kconfig"
 
-# Three-tier subrating: ACTIVE (typing) -> IDLE (~30s) -> DORMANT (+5min)
+# Three-tier subrating: ACTIVE (typing) -> IDLE (ZMK_BLE_SUBRATE_IDLE_DELAY after idle) -> DORMANT
 # Central controls tier transitions; peripheral requests ACTIVE on local activity
 
 # ACTIVE tier params shared by both central and peripheral
@@ -96,53 +96,9 @@ config ZMK_BLE_SUBRATE_DORMANT_MAX_LATENCY
 	default 0
 	range 0 499
 
-# Host connection parameters for dormant tier
-# When entering dormant, request slower connection interval from hosts to save power
-
-config ZMK_BLE_HOST_CONN_PARAM_DORMANT
-	bool "Update host connection parameters when dormant"
-	default n
-	help
-	  When entering dormant tier, request slower connection parameters from
-	  host devices to reduce power consumption. Parameters are restored when
-	  returning to active state.
-
-if ZMK_BLE_HOST_CONN_PARAM_DORMANT
-
-config ZMK_BLE_HOST_CONN_DORMANT_INT_MIN
-	int "Host dormant connection interval minimum (1.25ms units)"
-	default 36
-	range 6 3200
-	help
-	  Minimum connection interval when dormant. 36 = 45ms.
-	  Must be a multiple of 12 (15ms) per Apple guidelines.
-
-config ZMK_BLE_HOST_CONN_DORMANT_INT_MAX
-	int "Host dormant connection interval maximum (1.25ms units)"
-	default 36
-	range 6 3200
-	help
-	  Maximum connection interval when dormant. 36 = 45ms.
-	  Must be at least 12 (15ms) greater than min, or equal to min.
-
-config ZMK_BLE_HOST_CONN_DORMANT_LATENCY
-	int "Host dormant peripheral latency"
-	default 30
-	range 0 30
-	help
-	  Number of connection events the peripheral can skip when dormant.
-	  Higher values save more power but increase response latency.
-	  Apple guidelines: max 30, and interval_max * (latency + 1) <= 6000ms.
-
-config ZMK_BLE_HOST_CONN_DORMANT_TIMEOUT
-	int "Host dormant supervision timeout (10ms units)"
-	default 600
-	range 10 3200
-	help
-	  Supervision timeout when dormant. 600 = 6000ms.
-	  Must be > interval_max * (latency + 1) * 3.
-
-endif # ZMK_BLE_HOST_CONN_PARAM_DORMANT
+module = ZMK_BLE_SUBRATING
+module-str = zmk_ble_subrating
+source "subsys/logging/Kconfig.template.log_config"
 
 endif # BT_SUBRATING && ZMK_SPLIT_ROLE_CENTRAL
 
@@ -154,112 +110,6 @@ config ZMK_BLE_SUBRATE_PERIPHERAL_TIMEOUT
 	range 10 3200
 
 endif # BT_SUBRATING && ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
-
-# ============================================================================
-# ============================================================================
-# BLE LLPM (Low Latency Packet Mode) for split link
-# ============================================================================
-
-menuconfig ZMK_BLE_SCI
-	bool "BLE SCI (Shorter Connection Intervals) for split link"
-	depends on ZMK_BT_LL_SOFTDEVICE
-	depends on BT_CENTRAL
-	select BT_CTLR_SDC_SHORTER_CONNECTION_INTERVALS
-	select BT_CTLR_SDC_CONNECTION_RATE_UPDATE
-	select BT_CTLR_FRAME_SPACE_UPDATE
-	help
-	  Use standard BLE 6.2 Shorter Connection Intervals to run the
-	  split central-peripheral BLE link at sub-7.5ms connection
-	  intervals (down to 750us on nRF52840 with 2M PHY).
-
-	  Negotiated via standard LL_CONNECTION_RATE_REQUEST PDUs —
-	  no vendor-specific LLPM handshake needed. Requires both sides
-	  to run nrfxlib v3.4.0+ with SCI support enabled.
-
-	  The host link (to macOS/Windows/Linux) is unaffected — SCI
-	  only applies to connections where the local device is the
-	  BLE central.
-
-	  Trade-off: lower latency and less trailing float, but more
-	  radio wakeups (higher power during active use).
-
-if ZMK_BLE_SCI
-
-config ZMK_BLE_SCI_INTERVAL_US
-	int "SCI connection interval (microseconds)"
-	default 2000
-	range 750 7000
-	help
-	  Target connection interval for the split link in microseconds.
-	  BLE 6.2 SCI uses 0.125ms (125us) units internally.
-	  750  = 750us (lowest on nRF52840 with 2M PHY + lowest FSU)
-	  1000 = 1ms
-	  2000 = 2ms (good balance for trackpoint/mouse)
-	  7000 = 7ms (close to standard BLE minimum)
-
-config ZMK_BLE_SCI_SWITCH_DELAY_MS
-	int "Delay before starting SCI procedures (ms)"
-	default 500
-	range 100 5000
-	help
-	  Milliseconds to wait after PHY 2M is established before
-	  starting the SCI switch (Frame Space Update + Connection
-	  Rate Request). Allows pairing/encryption to complete first.
-
-config ZMK_BLE_SCI_PHY_SWITCH_DELAY_MS
-	int "Delay for PHY-triggered SCI switch (ms)"
-	default 2500
-	range 1000 10000
-	help
-	  Milliseconds to wait after PHY 2M before starting SCI on a new
-	  connection. Longer than SCI_SWITCH_DELAY_MS to give the peripheral
-	  trackpoint init time to complete PS/2 initialization at standard
-	  7.5ms CI before SCI drops CI to sub-7.5ms.
-
-config ZMK_BLE_SCI_RETRIGGER_DELAY_MS
-	int "Delay before re-triggering SCI after reconnection (ms)"
-	default 50
-	range 10 200
-	help
-	  Milliseconds to wait before re-triggering SCI after the split
-	  peripheral reconnects with active parameters (CI <= 10ms,
-	  latency=0). Shorter than the initial delay since the link is
-	  already established. Only applies to reconnection scenarios
-	  where SCI was previously active.
-
-config ZMK_BLE_SCI_FLUSH_TIMEOUT_MIN_SLOTS
-	int "Minimum flush timeout (baseband slots, 0.625ms each)"
-	default 8
-	range 0 255
-	help
-	  Minimum flush timeout for Flushable ACL Data. The actual
-	  timeout scales with the connection interval to allow ~3
-	  connection events for delivery:
-	    flush_slots = max(this, CI_slots * 3)
-
-	  8 slots = 5ms (good floor for sub-7.5ms CI).
-	  Set to 0 to disable flush timeout entirely.
-
-	  Requires CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA=y.
-
-config ZMK_BLE_SCI_SUPERVISION_TIMEOUT
-	int "SCI supervision timeout (×10ms)"
-	default 600
-	range 100 3200
-	help
-	  Supervision timeout for the SCI connection in 10ms units.
-	  600 = 6 seconds. Range: 1-32 seconds.
-
-	  With 2ms CI and subrating (idle factor=15, dormant factor=80),
-	  a 4s timeout gives only ~25 missed dormant events before
-	  disconnect. 6s survives longer Wi-Fi interference bursts
-	  without triggering unnecessary split reconnections.
-
-module = ZMK_BLE_SCI
-module-str = zmk_ble_sci
-source "subsys/logging/Kconfig.template.log_config"
-
-endif # ZMK_BLE_SCI
 
 # ============================================================================
 # BLE QoS Channel Map Filter

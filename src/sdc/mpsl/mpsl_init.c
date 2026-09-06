@@ -300,6 +300,9 @@ ISR_DIRECT_DECLARE(mpsl_radio_isr_wrapper)
 #endif /* IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */
 
 #if IS_ENABLED(CONFIG_MPSL_ASSERT_HANDLER)
+/* Application-provided (sdk-nrf declares it in mpsl/mpsl_assert.h). */
+extern void mpsl_assert_handle(char *file, uint32_t line);
+
 void m_assert_handler(const char *const file, const uint32_t line)
 {
 	mpsl_assert_handle((char *) file, line);

@@ -190,6 +190,7 @@ static void subrate_changed_cb(struct bt_conn *conn,
     }
 }
 
+#if IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
 /* A connection rate change (split_link_sci.c) carries its own subrate
  * parameters, so the tier is applied again once it lands. */
 static void conn_rate_changed_cb(struct bt_conn *conn, uint8_t status,
@@ -205,6 +206,7 @@ static void conn_rate_changed_cb(struct bt_conn *conn, uint8_t status,
         apply_tier(current_tier, true);
     }
 }
+#endif
 
 /* A new central link runs the ACTIVE defaults (subrating_init). If the
  * keyboard is idle while the link comes up, apply the idle tier once the link
@@ -239,7 +241,9 @@ BT_CONN_CB_DEFINE(zmk_ble_subrating) = {
     .security_changed = security_changed_cb,
     .disconnected = disconnected_cb,
     .subrate_changed = subrate_changed_cb,
+#if IS_ENABLED(CONFIG_BT_SHORTER_CONNECTION_INTERVALS)
     .conn_rate_changed = conn_rate_changed_cb,
+#endif
 };
 
 /* ---- activity ---- */

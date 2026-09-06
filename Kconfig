@@ -120,6 +120,7 @@ menuconfig ZMK_BLE_QOS
 	depends on ZMK_BT_LL_SOFTDEVICE
 	depends on BT_CENTRAL
 	select BT_HCI_VS_EVT_USER
+	select ZMK_BLE_VS_EVT
 	select BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 	help
 	  Dynamically avoids congested BLE channels using per-connection CRC
@@ -554,3 +555,102 @@ config ZMK_BLE_PATH_LOSS_MIN_TIME_SPENT
 	  With 7.5ms host CI: 100 events = ~0.75 seconds.
 
 endif # ZMK_BLE_PATH_LOSS_MONITORING
+
+config ZMK_BLE_VS_EVT
+	bool
+	help
+	  Shared dispatcher for the host's single vendor-event callback.
+
+# ============================================================================
+# Peripheral latency mode (SoftDevice vendor command 0xFD09)
+# ============================================================================
+
+config ZMK_BLE_PERIPHERAL_LATENCY_MODE
+	bool "Set the peripheral latency mode on peripheral-role links"
+	depends on ZMK_BT_LL_SOFTDEVICE && BT_PERIPHERAL
+	help
+	  Apply a SoftDevice peripheral latency mode to every link where this
+	  half is the peripheral: the split link on the left half, the HID host
+	  link on the right. The mode is set once per connection from a work item.
+
+choice ZMK_BLE_PERIPHERAL_LATENCY_MODE_CHOICE
+	prompt "Peripheral latency mode"
+	depends on ZMK_BLE_PERIPHERAL_LATENCY_MODE
+	default ZMK_BLE_PERIPHERAL_LATENCY_WAIT_FOR_ACK
+
+config ZMK_BLE_PERIPHERAL_LATENCY_WAIT_FOR_ACK
+	bool "Wait for ack"
+	help
+	  Listen to every connection event until the central has acknowledged
+	  the peripheral's data, then resume skipping events. Bounds the
+	  retransmit delay of a missed packet to one interval instead of one
+	  latency window. Costs power only while unacknowledged data is pending.
+
+config ZMK_BLE_PERIPHERAL_LATENCY_DISABLE
+	bool "Latency disabled"
+	help
+	  Listen to every connection event regardless of the negotiated latency.
+
+config ZMK_BLE_PERIPHERAL_LATENCY_ENABLE
+	bool "Standard latency"
+
+endchoice
+
+# ============================================================================
+# Scanner: legacy advertising packets only (vendor command 0xFD1C)
+# ============================================================================
+
+config ZMK_BLE_SCAN_LEGACY_ONLY
+	bool "Scanner ignores extended advertising packets"
+	depends on ZMK_BT_LL_SOFTDEVICE && BT_OBSERVER
+	help
+	  The split peripheral advertises with legacy PDUs only. A scanner that
+	  does not receive extended advertising packets can catch more legacy
+	  packets per window, which shortens reconnection during the backed-off
+	  scan phase.
+
+# ============================================================================
+# Diagnostics: anchor point reports, channel survey log
+# ============================================================================
+
+config ZMK_BLE_ANCHOR_REPORT
+	bool "Log connection anchor point statistics (diagnostic)"
+	depends on ZMK_BT_LL_SOFTDEVICE && BT_CONN
+	select BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
+	select BT_HCI_VS_EVT_USER
+	select ZMK_BLE_VS_EVT
+	help
+	  Enable the SoftDevice's per-event anchor point reports and log, per
+	  link, the effective interval, the number of unreported events and the
+	  phase between two links. One HCI event per connection event: for a
+	  diagnostic image only.
+
+config ZMK_BLE_ANCHOR_REPORT_INTERVAL_S
+	int "Anchor report summary interval (s)"
+	depends on ZMK_BLE_ANCHOR_REPORT
+	default 10
+	range 1 3600
+
+config ZMK_BLE_QOS_SURVEY_LOG
+	bool "Log the QoS channel survey without the channel map filter"
+	depends on ZMK_BT_LL_SOFTDEVICE && !ZMK_BLE_QOS
+	select BT_CTLR_SDC_QOS_CHANNEL_SURVEY
+	select BT_HCI_VS_EVT_USER
+	select ZMK_BLE_VS_EVT
+	help
+	  Run the SoftDevice channel survey on a half that cannot change the
+	  channel map and log the 40 channel energies periodically.
+
+if ZMK_BLE_QOS_SURVEY_LOG
+
+config ZMK_BLE_QOS_SURVEY_LOG_INTERVAL_S
+	int "Survey log interval (s)"
+	default 60
+	range 5 3600
+
+config ZMK_BLE_QOS_SURVEY_LOG_SURVEY_INTERVAL_US
+	int "Survey measurement interval (us)"
+	default 500000
+	range 3000 4000000
+
+endif # ZMK_BLE_QOS_SURVEY_LOG

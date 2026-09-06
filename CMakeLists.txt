@@ -50,6 +50,27 @@ if(CONFIG_ZMK_BT_LL_SOFTDEVICE AND CONFIG_BT_SUBRATING AND CONFIG_ZMK_SPLIT_ROLE
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 endif()
 
+if(CONFIG_ZMK_BLE_VS_EVT)
+  zephyr_library_sources(src/vs_evt.c)
+  zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
+endif()
+
+if(CONFIG_ZMK_BLE_PERIPHERAL_LATENCY_MODE)
+  zephyr_library_sources(src/peripheral_latency.c)
+endif()
+
+if(CONFIG_ZMK_BLE_SCAN_LEGACY_ONLY)
+  zephyr_library_sources(src/scan_legacy.c)
+endif()
+
+if(CONFIG_ZMK_BLE_ANCHOR_REPORT)
+  zephyr_library_sources(src/anchor_report.c)
+endif()
+
+if(CONFIG_ZMK_BLE_QOS_SURVEY_LOG)
+  zephyr_library_sources(src/survey_log.c)
+endif()
+
 if(CONFIG_ZMK_BLE_QOS)
   zephyr_library_sources(src/qos.c)
   zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/src/util/chmap_filter/include)

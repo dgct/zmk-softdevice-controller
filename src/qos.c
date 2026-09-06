@@ -34,6 +34,7 @@
 #include <zmk/sdc/hci_compat.h>
 
 #include <sdc_hci_vs.h>
+#include <zmk/sdc/vs_evt.h>
 
 #include "chmap_filter.h"
 
@@ -969,9 +970,9 @@ static int qos_init(void)
         apply_filter_params();
         scores_reset();
 
-        err = bt_hci_register_vnd_evt_cb(on_vs_evt);
+        err = zmk_sdc_vs_evt_register(on_vs_evt);
         if (err) {
-                LOG_ERR("Failed to register VS event callback: %d", err);
+                LOG_ERR("Failed to register VS event handler: %d", err);
                 return err;
         }
 

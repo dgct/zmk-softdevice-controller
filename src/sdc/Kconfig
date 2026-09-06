@@ -280,9 +280,24 @@ config BT_CTLR_LE_FLUSHABLE_ACL_DATA
 	  for mouse/trackpoint data on the split link where freshness
 	  matters more than reliability.
 
+config BT_CTLR_MIN_VAL_OF_MAX_ACL_TX_PAYLOAD_DEFAULT
+	int "Minimum value of the maximum ACL TX payload (bytes)"
+	default 27
+	range 10 27
+	help
+	  Below 27, the controller may shrink its TX payload so that a connection
+	  event shorter than one full 27-byte packet pair still fits (vendor
+	  command 0xFD16). 27 leaves the controller default untouched.
+
+config BT_CTLR_SDC_EVENT_TRIGGER
+	bool "Route the event start task vendor command"
+	help
+	  Make the SoftDevice's set_event_start_task command (0xFD1E) reachable
+	  from the host. Nothing sends it yet.
+
 config BT_CTLR_SDC_USE_GLOBAL_CHANNEL_MAP
 	bool "Use global channel map on connection"
-	default y if BT_CTLR_SDC
+	default y
 	help
 	  New connections inherit the host's global channel classification
 	  immediately instead of starting with all 37 channels enabled.

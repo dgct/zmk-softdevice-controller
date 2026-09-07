@@ -46,7 +46,7 @@ static int set_mode(struct bt_conn *conn) {
         return err;
     }
 
-    struct net_buf *buf = bt_hci_cmd_alloc(K_FOREVER);
+    struct net_buf *buf = bt_hci_cmd_alloc(K_MSEC(100));
 
     if (!buf) {
         return -ENOMEM;

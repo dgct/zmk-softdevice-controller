@@ -29,7 +29,7 @@ static void apply_handler(struct k_work *work) {
         return;
     }
 
-    struct net_buf *buf = bt_hci_cmd_alloc(K_FOREVER);
+    struct net_buf *buf = bt_hci_cmd_alloc(K_MSEC(100));
 
     if (!buf) {
         return;

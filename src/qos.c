@@ -176,17 +176,24 @@ static int apply_filter_params(void);
  */
 static bool on_vs_evt(struct net_buf_simple *buf)
 {
-        uint8_t *subevent_code;
-        sdc_hci_subevent_vs_qos_conn_event_report_t *evt;
+        const sdc_hci_subevent_vs_qos_conn_event_report_t *evt;
 
-        subevent_code = net_buf_simple_pull_mem(buf, sizeof(*subevent_code));
+        /* Both subevents are parsed straight from the buffer: check the
+         * length the controller sent before touching any field. */
+        if (buf->len < sizeof(uint8_t)) {
+                return false;
+        }
+        uint8_t subevent_code = net_buf_simple_pull_u8(buf);
 
-        switch (*subevent_code) {
+        switch (subevent_code) {
         case SDC_HCI_SUBEVENT_VS_QOS_CONN_EVENT_REPORT:
+                if (buf->len < sizeof(*evt)) {
+                        return false;
+                }
                 if (atomic_get(&processing)) {
                         return true;
                 }
-                evt = (void *)buf->data;
+                evt = (const void *)buf->data;
                 /* Only feed central-role (split-link) CRC data.
                  * Skip peripheral-role (host/dongle-link) events. */
                 {
@@ -202,14 +209,15 @@ static bool on_vs_evt(struct net_buf_simple *buf)
                                 return true;
                         }
                 }
-                /* Feed Nordic's chmap_filter (preserves WiFi detection) */
-                chmap_filter_crc_update(chmap_inst,
-                        evt->channel_index,
-                        evt->crc_ok_count,
-                        evt->crc_error_count);
                 /* Accumulate for priority score system.
-                 * Saturating add — overflow caps at 255. */
+                 * Saturating add — overflow caps at 255.  The filter and the
+                 * score table are both indexed by the channel: bound it first. */
                 if (evt->channel_index < 37) {
+                        /* Feed Nordic's chmap_filter (preserves WiFi detection) */
+                        chmap_filter_crc_update(chmap_inst,
+                                evt->channel_index,
+                                evt->crc_ok_count,
+                                evt->crc_error_count);
                         struct channel_score *s = &ch_scores[evt->channel_index];
                         uint16_t new_ok = (uint16_t)s->crc_ok_acc +
                                           evt->crc_ok_count;
@@ -226,8 +234,11 @@ static bool on_vs_evt(struct net_buf_simple *buf)
                 return true;
 #if IS_ENABLED(CONFIG_ZMK_BLE_QOS_CHANNEL_SURVEY)
         case SDC_HCI_SUBEVENT_VS_QOS_CHANNEL_SURVEY_REPORT: {
-                sdc_hci_subevent_vs_qos_channel_survey_report_t *srv =
-                        (void *)buf->data;
+                if (buf->len < sizeof(sdc_hci_subevent_vs_qos_channel_survey_report_t)) {
+                        return false;
+                }
+                const sdc_hci_subevent_vs_qos_channel_survey_report_t *srv =
+                        (const void *)buf->data;
                 memcpy(survey_energy, srv->channel_energy, sizeof(survey_energy));
                 atomic_set(&survey_data_ready, true);
                 return true;
